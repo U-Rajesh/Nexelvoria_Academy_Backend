@@ -18,6 +18,7 @@ specific module. **P2** should be settled before launch.
 | Q2 | Business code generation | P1 | lead + business |
 | Q3 | **Dual OTP (BR-001) vs SMS disabled (BR-014)** | **P0** | lead + business |
 | Q4 | Eight business rules referenced but undefined | P0 | business / SRS owner |
+| Q4a | **Lockout policy: permanent or timed** | P1 | lead + business |
 | Q5 | Batch capacity limit | P1 | administration |
 | Q6 | Refund eligibility window | P1 | finance + legal |
 | Q7 | Placement guarantee terms | P2 | legal |
@@ -249,6 +250,47 @@ termination and `SystemConfig.security.sessionTimeoutMinutes`. Also decide:
 `localStorage` versus httpOnly cookie (the frontend already does
 `localStorage`, which is XSS-exposed but already built), and whether
 device/IP/location capture needs a geo-IP provider.
+
+---
+
+## Q4a — Lockout policy: permanent or timed? (P1, raised to blocking at Step 6G)
+
+**This is the final form of O4**, and it now blocks the login service.
+
+The credential repository (Step 6G) implements **counter-based permanent
+lockout**: a credential is locked once `failedLoginAttempts >= threshold` and
+stays locked until a password reset or an administrator unlock clears the
+counter. There is no automatic time-based unlock.
+
+**Why the timed option was removed rather than kept alongside it.** The first
+implementation accepted a lock duration AND treated the counter at the
+threshold as locked. Those two rules contradict each other: once the timestamp
+elapsed, the counter was still at the threshold, so a "timed" lockout could
+never actually expire. Keeping both would have meant either a lockout that
+silently never expires, or silently adding an automatic unlock that weakens the
+confirmed frontend behaviour. Neither is acceptable by default, so the timed
+half was dropped and the single confirmed rule kept.
+
+**Evidence for the implemented behaviour:** the frontend's lockout messages say
+"Please reset your password" and "unlock via Forgot Password", it never
+populates `lockedUntil`, and `authService` clears the counter on a successful
+reset. So permanent-until-reset is what the completed UI describes.
+
+**The decision needed:**
+
+| Option | Consequence |
+| --- | --- |
+| **A. Permanent until reset or admin unlock** (implemented) | Matches the confirmed UI. A user locked out at 2am must reset their password or wait for an admin. Higher support load. |
+| **B. Timed lockout** (e.g. 15 or 30 minutes) | Better UX for the honest forgetful user. **Requires deciding what happens to the counter when the timer expires** - reset it to 0, or leave it and lock again on the next failure? That decision is the contradiction above, and it must be made explicitly. |
+| **C. Both** - timed lockout with escalation | Most forgiving and most complex; needs a policy table. |
+
+**Recommendation: A for launch**, because it is what the frontend already tells
+users, and revisit once there is real support data. If B is chosen, the counter
+must be reset when the timer expires, and `lockedUntil` becomes the single
+source of truth rather than a second one.
+
+`lockedUntil` remains in the record and should remain in the schema either way;
+under option A it is permanently NULL.
 
 ---
 
@@ -563,6 +605,51 @@ retrofit after data loss is reported.
 
 ---
 
+## Q25 — How is a `User` linked to a `Student`? (P0, raised at Step 6K — BLOCKING)
+
+**Raised by:** the registration service (Step 6K).
+
+`StudentRepository.create(input: CreateStudentInput)` takes **no `userId`**,
+and `CreateStudentInput` omits `id`. There is therefore no way to express
+"this student row belongs to this user account".
+
+Registration needs that link. It creates a `User` (which owns the email, the
+mobile, the role and the status, and which login reads) and must also store
+the admissions profile — college, degree, passing year, date of birth,
+gender, address, guardian contact. With today's contract, writing both
+produces two records with unrelated ids and nothing connecting them. The
+student row would be invisible to `UserRepository.findByEmail`, so login
+would never see it.
+
+**Step 6K therefore does not write the student row at all** — it validates
+every field and persists only the identity and the credential. An unlinked
+orphan is worse than a documented gap. See auth-implementation-plan.md
+§21.2 and §21.3.
+
+**What needs deciding:**
+
+1. **Does `Student.id` equal `User.id`, or is there a separate `userId`
+   foreign key?** One-to-one shared primary key is simpler and makes the
+   relationship unmissable; a separate key is more flexible if a person
+   could ever hold two roles.
+2. **Is the student row created at registration or at admin approval
+   (BR-002)?** If at registration, the profile lands immediately and the row
+   exists in a pre-approval state. If at approval, the admissions data has
+   to live somewhere in between — which today there is nowhere to put.
+3. **Is creating the user and the student one atomic operation?** If they
+   must both exist or neither, this needs the unit of work from **Q-CR6 /
+   Q-X1**, not two repository calls.
+
+**Smallest change that unblocks registration:** add `userId: EntityId` to
+`CreateStudentInput` and answer (2). That is a contract change in
+**Developer 2's module**, so it needs the Backend Lead's approval and
+coordination rather than a unilateral edit.
+
+**Blocks:** storing any registered student's academic profile; the
+registration HTTP endpoint; `students` module integration with auth.
+
+---
+
 ## Summary — what blocks what
 
 **P0, blocking the next step:**
@@ -573,6 +660,8 @@ retrofit after data loss is reported.
   every guarded route.
 - **Q11** (file storage) blocks `students`, `assignments` and `cms`.
 - **Q1** (identifiers) blocks repository adapters, though not service logic.
+- **Q25** (user-to-student linkage) blocks storing a registered student's
+  academic profile and the registration endpoint. Raised at Step 6K.
 - **Q4** (undefined business rules) blocks any module touching a missing rule —
   at minimum `assessments` via BR-012.
 

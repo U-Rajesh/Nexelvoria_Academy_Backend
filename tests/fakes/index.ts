@@ -1,5 +1,7 @@
 import { createContainer, type AppContainer } from "../../src/container/container";
 import { InMemoryCourseRepository } from "./in-memory-course.repository";
+import { InMemoryCredentialRepository } from "./in-memory-credential.repository";
+import { InMemorySessionRepository } from "./in-memory-session.repository";
 import { InMemoryEnrollmentRepository } from "./in-memory-enrollment.repository";
 import { InMemoryStudentRepository } from "./in-memory-student.repository";
 import { InMemoryTeacherRepository } from "./in-memory-teacher.repository";
@@ -14,6 +16,8 @@ import { InMemoryUserRepository } from "./in-memory-user.repository";
  */
 export interface TestHarness {
   container: AppContainer;
+  credentials: InMemoryCredentialRepository;
+  sessions: InMemorySessionRepository;
   users: InMemoryUserRepository;
   students: InMemoryStudentRepository;
   teachers: InMemoryTeacherRepository;
@@ -31,6 +35,8 @@ export interface TestHarness {
  * between tests.
  */
 export const createTestHarness = (): TestHarness => {
+  const credentials = new InMemoryCredentialRepository();
+  const sessions = new InMemorySessionRepository();
   const users = new InMemoryUserRepository();
   const students = new InMemoryStudentRepository();
   const teachers = new InMemoryTeacherRepository();
@@ -38,6 +44,8 @@ export const createTestHarness = (): TestHarness => {
   const enrollments = new InMemoryEnrollmentRepository();
 
   const container = createContainer({
+    credentials: () => credentials,
+    sessions: () => sessions,
     users: () => users,
     students: () => students,
     teachers: () => teachers,
@@ -47,12 +55,16 @@ export const createTestHarness = (): TestHarness => {
 
   return {
     container,
+    credentials,
+    sessions,
     users,
     students,
     teachers,
     courses,
     enrollments,
     reset: () => {
+      credentials.reset();
+      sessions.reset();
       users.reset();
       students.reset();
       teachers.reset();
@@ -63,6 +75,8 @@ export const createTestHarness = (): TestHarness => {
 };
 
 export { InMemoryCourseRepository } from "./in-memory-course.repository";
+export { InMemoryCredentialRepository } from "./in-memory-credential.repository";
+export { InMemorySessionRepository } from "./in-memory-session.repository";
 export { InMemoryEnrollmentRepository } from "./in-memory-enrollment.repository";
 export { InMemoryStudentRepository } from "./in-memory-student.repository";
 export { InMemoryTeacherRepository } from "./in-memory-teacher.repository";
