@@ -6,25 +6,26 @@ import {
   SUPER_ADMIN_ONLY,
   type UserRole,
 } from "../contracts/user.contract";
+import type { EntityId } from "../contracts/identifier.contract";
 import { ApiError } from "../utils/api-error";
 import { logger } from "../utils/logger";
 
 /**
  * Authorization scaffolding.
  *
- * AUTHENTICATION IS NOT IMPLEMENTED YET. Nothing in this file inspects a
- * token, and nothing populates `req.user` - that is the authentication
- * middleware's job in a later step, once Q13 (token strategy) is decided.
+ * Nothing in this file inspects a token. Identity is established by
+ * `authenticate` (Step 6D), which sets `req.principal` from a verified
+ * access token; these guards only decide whether that identity is allowed.
  *
- * These guards therefore deny every request today. That is deliberate and
- * correct: a guard that defaults to "allow" while authentication is missing
- * is an open door. The guards FAIL CLOSED.
+ * With no identity on the request the guards deny. That is deliberate: a
+ * guard that defaults to "allow" when authentication did not run is an open
+ * door. The guards FAIL CLOSED.
  *
  * Two rules that must never be relaxed:
  *
- *  1. Identity comes only from `req.user`, which only the authentication
- *     middleware may set. A role or user id arriving in a request body,
- *     query string or header is attacker-controlled and is ignored here.
+ *  1. Identity comes only from the request properties that `authenticate`
+ *     sets. A role or user id arriving in a request body, query string or
+ *     header is attacker-controlled and is ignored here.
  *     The mock frontend passes `admin: { id, name }` as an argument; the
  *     real API must derive the actor from the session instead.
  *
@@ -34,13 +35,54 @@ import { logger } from "../utils/logger";
  *     user out instead of showing them a permission error.
  */
 
+/** The only two fields a guard needs in order to make a decision. */
+interface Actor {
+  id: EntityId;
+  role: UserRole;
+}
+
+/**
+ * Reads the identity off the request.
+ *
+ * `req.principal` is the SOLE authorization identity, set only by
+ * `authenticate` after a verified access token. Decided by the backend lead
+ * at Step 6E; the previous `req.user` fallback has been removed.
+ *
+ * `req.user` is still declared on the Request type (see
+ * contracts/express.contract.ts) so existing and in-flight code keeps
+ * compiling, but it NO LONGER GRANTS ACCESS. Rather than fail silently -
+ * the worst outcome, because it looks like a mysterious 403 - a request
+ * carrying `req.user` without a principal is logged loudly and denied.
+ *
+ * Returns undefined when no principal is present, which is what makes the
+ * guards fail closed.
+ */
+const resolveActor = (req: Request): Actor | undefined => {
+  if (req.principal !== undefined) {
+    return { id: req.principal.id, role: req.principal.role };
+  }
+
+  if (req.user !== undefined) {
+    logger.error(
+      "req.user is set but req.principal is not: identity IGNORED and request denied. " +
+        "Authorization reads req.principal only, which `authenticate` populates from a " +
+        "verified access token.",
+      {
+        requestId: req.requestId,
+        method: req.method,
+        path: req.originalUrl.split("?")[0] ?? req.originalUrl,
+      },
+    );
+  }
+
+  return undefined;
+};
+
 /**
  * Requires an authenticated caller, without checking the role.
- *
- * Returns 401 until authentication exists.
  */
 export const requireAuth: RequestHandler = (req: Request, _res: Response, next: NextFunction) => {
-  if (req.user === undefined) {
+  if (resolveActor(req) === undefined) {
     next(
       ApiError.unauthorized(
         "Authentication required",
@@ -68,7 +110,7 @@ export const requireRoles = (allowed: readonly UserRole[]): RequestHandler => {
   }
 
   return (req: Request, _res: Response, next: NextFunction): void => {
-    const user = req.user;
+    const user = resolveActor(req);
 
     // Fail closed: no identity means denied, never "skip the check".
     if (user === undefined) {

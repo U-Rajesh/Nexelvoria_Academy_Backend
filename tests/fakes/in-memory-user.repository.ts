@@ -73,12 +73,25 @@ export class InMemoryUserRepository implements UserRepository {
     return paginate(rows, pagination);
   }
 
+  /**
+   * ATOMIC, deliberately.
+   *
+   * The uniqueness checks and the insert run in ONE synchronous block with
+   * no `await` between them, which is what models a SQL UNIQUE index.
+   *
+   * This previously used `await this.existsByEmail(...)`. Each `await` is a
+   * microtask boundary, so two concurrent creates could both observe the
+   * identifier as free and both insert - a race the real database cannot
+   * have. It also meant a concurrency test could pass for the wrong reason,
+   * or fail depending on microtask ordering. `store.find` is synchronous,
+   * so the fix costs nothing.
+   */
   async create(input: CreateUserInput): Promise<User> {
-    if (await this.existsByEmail(input.email)) {
+    if (this.store.find((u) => equalsIgnoreCase(u.email, input.email)) !== null) {
       throw new DuplicateRecordError("user", "email", input.email);
     }
 
-    if (await this.existsByMobile(input.mobile)) {
+    if (this.store.find((u) => u.mobile === input.mobile) !== null) {
       throw new DuplicateRecordError("user", "mobile", input.mobile);
     }
 

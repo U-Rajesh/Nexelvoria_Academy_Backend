@@ -60,6 +60,21 @@ export class ApiError extends Error {
     return new ApiError(HttpStatus.TOO_MANY_REQUESTS, message, code);
   }
 
+  /**
+   * A dependency we need is unavailable or misconfigured.
+   *
+   * Distinct from a 500: nothing is broken in the request, and the caller
+   * may reasonably retry. Used where identity cannot be ESTABLISHED (as
+   * opposed to being established and rejected) - see
+   * authenticate.middleware.ts.
+   */
+  static serviceUnavailable(
+    message = "Service temporarily unavailable",
+    code = "SERVICE_UNAVAILABLE",
+  ): ApiError {
+    return new ApiError(HttpStatus.SERVICE_UNAVAILABLE, message, code);
+  }
+
   static validation(details: FieldIssue[], message = "Validation failed"): ApiError {
     return new ApiError(HttpStatus.UNPROCESSABLE_ENTITY, message, "VALIDATION_ERROR", details);
   }

@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+
 import "dotenv/config";
 
 /**
@@ -91,6 +93,93 @@ const parseOrigins = (value: string | undefined): readonly string[] => {
   return Object.freeze(origins);
 };
 
+/**
+ * Minimum accepted length for JWT_SECRET.
+ *
+ * HS256 keys shorter than the hash output (32 bytes) weaken the HMAC, and a
+ * short secret is brute-forceable offline once an attacker holds one token.
+ */
+const MIN_JWT_SECRET_LENGTH = 32;
+
+/**
+ * Values that look like a secret but are not. Rejected outright so a
+ * copy-pasted .env.example placeholder can never reach production.
+ */
+const JWT_SECRET_PLACEHOLDERS = new Set([
+  "change-me",
+  "changeme",
+  "change_me",
+  "secret",
+  "jwt-secret",
+  "your-secret-here",
+  "replace-me",
+  "replace-with-a-long-random-secret",
+  "replace-with-a-long-random-secret-at-least-32-chars",
+]);
+
+/**
+ * Validates the JWT signing secret.
+ *
+ * Production fails closed: a missing, short or placeholder secret throws at
+ * startup rather than signing tokens with something guessable.
+ *
+ * Outside production a missing secret falls back to a random, per-process
+ * value so `npm run dev` works without configuration. The cost is explicit
+ * and acceptable in development: tokens stop verifying when the process
+ * restarts. A secret that IS supplied is validated in every environment, so
+ * nobody develops against a weak key and ships it.
+ */
+const parseJwtSecret = (value: string | undefined, nodeEnv: NodeEnv): string => {
+  const secret = value?.trim() ?? "";
+
+  if (secret === "") {
+    if (nodeEnv === "production") {
+      throw new Error(
+        "JWT_SECRET is required when NODE_ENV=production. Generate one with: " +
+          "node -e \"console.log(require('node:crypto').randomBytes(48).toString('base64url'))\"",
+      );
+    }
+
+    // Bootstrap-only console use: env.ts cannot import the logger because
+    // the logger imports env, and this must be visible before anything else
+    // loads. The secret itself is never printed.
+    console.warn(
+      "[config] JWT_SECRET is not set. Using a random per-process secret for " +
+        `NODE_ENV=${nodeEnv}; tokens will not survive a restart. Set JWT_SECRET in .env.`,
+    );
+
+    return randomBytes(48).toString("base64url");
+  }
+
+  if (secret.length < MIN_JWT_SECRET_LENGTH) {
+    throw new Error(
+      `JWT_SECRET is too short (${secret.length} characters). ` +
+        `At least ${MIN_JWT_SECRET_LENGTH} are required.`,
+    );
+  }
+
+  if (JWT_SECRET_PLACEHOLDERS.has(secret.toLowerCase())) {
+    throw new Error("JWT_SECRET is a placeholder value. Set a real random secret.");
+  }
+
+  return secret;
+};
+
+/** Non-secret identifier validation for issuer/audience. */
+const parseJwtLabel = (name: string, value: string | undefined, fallback: string): string => {
+  const label = value?.trim() ?? "";
+
+  if (label === "") {
+    return fallback;
+  }
+
+  if (label.length > 200) {
+    throw new Error(`${name} is too long (max 200 characters).`);
+  }
+
+  return label;
+};
+
 const NODE_ENV = parseNodeEnv(process.env["NODE_ENV"]);
 const CORS_ORIGINS = parseOrigins(process.env["CORS_ORIGINS"]);
 
@@ -123,6 +212,25 @@ export const env = {
     "RATE_LIMIT_WINDOW_MINUTES",
     process.env["RATE_LIMIT_WINDOW_MINUTES"],
     15,
+  ),
+
+  /**
+   * HS256 signing secret for access tokens.
+   *
+   * SENSITIVE. Never log this value, never return it from an endpoint, and
+   * never include it in an error message. `redact()` strips keys matching
+   * /secret/, which covers it if an object carrying it is ever logged.
+   */
+  JWT_SECRET: parseJwtSecret(process.env["JWT_SECRET"], NODE_ENV),
+
+  /** `iss` claim, validated on every verify. Not a secret. */
+  JWT_ISSUER: parseJwtLabel("JWT_ISSUER", process.env["JWT_ISSUER"], "nexelvoria-academy"),
+
+  /** `aud` claim, validated on every verify. Not a secret. */
+  JWT_AUDIENCE: parseJwtLabel(
+    "JWT_AUDIENCE",
+    process.env["JWT_AUDIENCE"],
+    "nexelvoria-academy-api",
   ),
 } as const;
 

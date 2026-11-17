@@ -1,3 +1,5 @@
+import type { CredentialRepository } from "../modules/auth/credential.repository";
+import type { SessionRepository } from "../modules/auth/session.repository";
 import type { CourseRepository } from "../modules/courses/course.repository";
 import type { EnrollmentRepository } from "../modules/enrollments/enrollment.repository";
 import type { StudentRepository } from "../modules/students/student.repository";
@@ -43,6 +45,10 @@ import type { UserRepository } from "../modules/users/user.repository";
  * compile error, and the editor can autocomplete what is available.
  */
 export interface RepositoryRegistry {
+  /** Password hashes and lockout state. The only path to a password hash. */
+  credentials: CredentialRepository;
+  /** Server-side sessions: the seam that makes revocation possible. */
+  sessions: SessionRepository;
   users: UserRepository;
   students: StudentRepository;
   teachers: TeacherRepository;
@@ -138,6 +144,12 @@ export const createContainer = (factories: RepositoryFactories = {}): AppContain
   // Explicit getters rather than a Proxy: five lines of repetition buys
   // full type inference, a readable stack trace and no casting games.
   const repositories: RepositoryRegistry = {
+    get credentials() {
+      return resolve("credentials");
+    },
+    get sessions() {
+      return resolve("sessions");
+    },
     get users() {
       return resolve("users");
     },

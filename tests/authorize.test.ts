@@ -24,13 +24,15 @@ import { startServer, json } from "./helpers/server";
  * application exposes no test or bypass endpoints, in production or
  * anywhere else.
  *
- * `asRole` stands in for the authentication middleware that does not exist
- * yet. It is test scaffolding only: it never ships, and it is the single
- * place a role is injected, which is exactly why the production guards can
- * safely refuse to read a role from anywhere but `req.user`.
+ * `asRole` stands in for `authenticate`, which in production derives the
+ * identity from a verified access token (see tests/authenticate.test.ts for
+ * that path end to end). It is test scaffolding only: it never ships, and
+ * it is the single place a role is injected, which is exactly why the
+ * production guards can safely refuse to read a role from anywhere but
+ * `req.principal`.
  */
 const asRole = (role: UserRole): RequestHandler => (req, _res, next) => {
-  req.user = { id: `user-${role}`, role, email: `${role}@test.local` };
+  req.principal = { id: `user-${role}`, role, sessionId: `session-${role}` };
   next();
 };
 
@@ -65,7 +67,7 @@ const callProtected = async (
 
 describe("authorization guards", () => {
   describe("missing authentication context (fail closed)", () => {
-    it("requireAuth denies with 401 when req.user is absent", async () => {
+    it("requireAuth denies with 401 when no principal is present", async () => {
       const { status, body } = await callProtected(requireAuth);
 
       assert.equal(status, 401);

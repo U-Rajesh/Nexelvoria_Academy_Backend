@@ -81,3 +81,32 @@ export const redactHeaders = (
 
   return output;
 };
+
+/**
+ * Describes an error for a log line WITHOUT its message.
+ *
+ * Driver and database exceptions routinely embed secrets in their text:
+ * `"Login failed for user 'sa'"`, connection strings, host names, ports,
+ * sometimes a parameter value. `redact()` cannot help, because it replaces
+ * values under sensitive KEYS and an exception message is free text under a
+ * perfectly innocent key.
+ *
+ * So the message is dropped entirely and only the error's class name is
+ * kept. That is enough to correlate an incident with the database's own
+ * logs - which hold the detail, in a place that is already trusted with it -
+ * while the operational context (user id, session id, operation) comes from
+ * the caller's own structured fields.
+ *
+ * Use this for ANY error that originated below the application: repository
+ * calls, drivers, network clients. For errors we construct ourselves the
+ * message is ours and safe to log.
+ */
+export const describeError = (err: unknown): string => {
+  if (err instanceof Error) {
+    return err.name === "" ? "Error" : err.name;
+  }
+
+  // Never stringify the value itself: a thrown string or object could be
+  // anything, including a credential.
+  return typeof err === "object" && err !== null ? "UnknownObjectThrown" : typeof err;
+};

@@ -56,6 +56,8 @@ the system before designing the schema.
 | --- | --- | --- | --- |
 | 1 | **Users** | Identity shared by every person | **Yes** |
 | 2 | **Students** | Learner profiles, admissions, approval | **Yes** |
+| 2a | **Credentials** | Password hashes, failed attempts, lockout | **Yes** - see section 15 |
+| 2b | **Sessions** | Server-side sessions + refresh-token rotation | **Yes** - see Step 6E |
 | 3 | **Teachers** | Trainer profiles and batch allocation | **Yes** |
 | 4 | **Courses** | Catalogue + curriculum tree | **Yes** |
 | 5 | **Enrollments** | Student-to-course lifecycle and progress | **Yes** |
@@ -548,3 +550,274 @@ Server's `ROWVERSION` is a natural fit).
 section 13, and a development database. The interfaces can absorb most schema
 decisions without changing — that is their purpose — but **Q-F4 and Q-X1 would
 change the interfaces themselves**, so they matter most.
+
+---
+
+## 15. Authentication credentials (added at Step 6G)
+
+A new repository port: `src/modules/auth/credential.repository.ts`, with its
+record shape in `credential.types.ts`. **Interface only — no SQL, no adapter,
+no connection.** Questions for you are tagged **Q-CR***.
+
+### 15.1 How credentials relate to users and sessions
+
+```
+User    --1:1--  Credential              password hash + lockout state
+User    --1:N--  Session                 one per device/login
+Session --1:N--  ConsumedRefreshToken    rotation history (Step 6E)
+```
+
+- **A credential belongs to exactly one user** and is keyed by the user id.
+  It holds no email, name, role or status — those live on the user, and
+  duplicating them would create a second source of truth and a second place
+  to enumerate accounts.
+- **`UserRepository` deliberately exposes no password field.** The credential
+  port is the only path to a hash, so an ordinary user query cannot select
+  one into an API response or a log line.
+- **Credentials and sessions are independent**, but two flows couple them: a
+  password change must revoke every session, and a suspension or role change
+  must too. **Neither is atomic today** — see Q-CR6.
+- **Login reads both**: resolve the identifier to a user
+  (`UserRepository.findByEmail` / `findByMobile`), then fetch that user's
+  credential by id. There is intentionally **no credential lookup by email**.
+
+### 15.2 The record we need stored
+
+Field names are the application's; storage names are yours.
+
+| Field | Purpose | Source |
+| --- | --- | --- |
+| `userId` | owner, and the natural key | — |
+| `passwordHash` | argon2id PHC string | Step 6B |
+| `passwordUpdatedAt` | when the password was last set | **confirmed** (`StudentProfile.lastPasswordChange`) |
+| `failedLoginAttempts` | consecutive failures, reset on success | **confirmed** |
+| `lockedUntil` | lockout expiry, if any | **confirmed** field, unconfirmed semantics (O4) |
+| `lastFailedLoginAt` | time of the latest failure | **proposed** |
+| `createdAt` / `updatedAt` | audit | — |
+
+**No separate algorithm, parameter or salt columns.** The PHC string
+(`$argon2id$v=19$m=47104,t=2,p=1$<salt>$<digest>`) already carries all three,
+which is what lets us raise the cost parameters later and upgrade each hash on
+its owner's next successful login without a schema change.
+
+### 15.3 Questions for the database team
+
+**Q-CR1 — Own table, or columns on the user table?** We assume a separate
+`credentials` table with `user_id` as both primary and foreign key (1:1). The
+separation is what keeps hashes out of ordinary user queries. If you would
+rather put the columns on the user row, say so — it works, but then **every**
+`SELECT *` on a user carries the hash, and we would want explicit column lists
+everywhere.
+
+**Q-CR2 — Hash column type and collation.** Argon2id PHC strings at our
+parameters are ~100 characters, but length varies with parameters and salt.
+Please size generously (e.g. `VARCHAR(255)`) and use a **non-Unicode,
+case-SENSITIVE, accent-sensitive** collation: the hash is ASCII base64, and a
+case-insensitive comparison would make two different hashes compare equal.
+This matters because `updatePasswordHash` compares on the hash (Q-CR4).
+
+**Q-CR3 — `recordFailedAttempt` must be ONE atomic statement.**
+**SUPERSEDED in part by section 15.5** - the `locked_until` CASE expression
+below was removed when timed lockout was dropped. The atomicity requirement
+stands. Original text kept for context:
+
+```sql
+UPDATE credentials
+   SET failed_login_attempts = failed_login_attempts + 1,
+       last_failed_login_at  = SYSUTCDATETIME(),
+       locked_until = CASE
+           WHEN failed_login_attempts + 1 >= @threshold AND locked_until IS NULL
+           THEN @lockUntil ELSE locked_until END
+ OUTPUT inserted.failed_login_attempts, inserted.locked_until
+ WHERE user_id = @userId;
+```
+
+**This is a security requirement, not a performance one.** A
+SELECT-then-UPDATE loses increments under concurrency: ten parallel guesses
+all read 0, all write 1, and a 5-attempt limit becomes unlimited. We have a
+test that fails on exactly that mistake. The `OUTPUT` clause avoids a second
+read on the login hot path, since the API must tell the user how many attempts
+remain.
+
+**Q-CR4 — password writes need a conditional update.**
+**SUPERSEDED by section 15.5** - `updatePasswordHash` was split into
+`changePassword`, `rehashPassword` and `resetPassword`, and the rehash now
+REQUIRES compare-and-set. Original text kept for context: For a password
+*change* the caller supplies the hash it verified, and the write must be
+guarded in the same statement (`WHERE user_id = @id AND password_hash =
+@expected`) so it cannot land on a credential a concurrent request already
+replaced. Zero rows affected must be distinguishable into "no such credential"
+and "hash mismatch" so the correct typed error is thrown. For a *reset*
+(forgot password) no expected hash exists and the update is unconditional —
+both modes are intentional.
+
+**Q-CR5 — Is the threshold policy or data?** We pass it in per call, because
+it is 5 in the confirmed frontend and configurable through
+`SystemConfig.security.maxFailedLogins`. We are **not** asking you to store it
+per user. Please confirm that is acceptable.
+
+**Q-CR6 — Cross-repository atomicity (the big one).** Three flows span tables
+with nothing making them atomic:
+
+| Flow | Touches |
+| --- | --- |
+| registration | `users` + `credentials` |
+| password change / reset | `credentials` + `sessions` (revoke all) |
+| suspension / role change | `users` + `sessions` (revoke all) |
+
+This is **Q-X1** restated with concrete cases. Until a unit of work exists we
+order the calls to fail safe (create the user before the credential; update
+the hash before revoking sessions) and handle partial failure in the service.
+**We need your view on how transactions should be expressed** — we lean to a
+`withTransaction(tx => ...)` unit of work with repositories resolved from `tx`.
+
+**Q-CR7 — Indexes.** Lookup is always by `user_id`, which is the primary key,
+so no secondary index is needed for reads. If you later want "accounts locked
+right now" or "passwords older than N days" reporting, those would need
+indexes on `locked_until` and `password_updated_at` — tell us if such queries
+are expected, and we will not assume them.
+
+**Q-CR8 — Retention.** When a user is deleted, is their credential row deleted
+or retained? Note the application has **no** delete operation on users (status
+changes are used instead — see §5), so we do not currently need a credential
+delete either, and the port deliberately has no `delete` method.
+
+**Q-CR9 — Unconfirmed lockout semantics (O4).** `lockedUntil` exists in the
+frontend but is never set, and the lockout messages say "reset your password
+to unlock". We therefore support **both**: a duration (expiring lockout) and
+no duration (locked until a password reset or an admin unlock). **The policy
+decision is still open** and belongs to the business, not to you — flagged so
+you are aware the column may be perpetually NULL.
+
+### 15.4 What we guarantee from the application side
+
+- A plaintext password never reaches this port. The service hashes first with
+  argon2id (`password.service.ts`), which enforces the policy, so a
+  non-compliant password cannot be stored.
+- A hash is never returned by an API, logged, or included in an error.
+- Failed-attempt counting and lockout live in one place, so they cannot drift
+  between login, reset and admin unlock.
+
+### 15.5 Security corrections after review (Step 6G, second pass)
+
+Two defects were found reviewing the first version of this port. Both changed
+the interface, so the SQL requirements below supersede §15.3 where they differ.
+
+**Correction 1 — a password rehash must be a compare-and-set.**
+
+The first version allowed an unconditional `updatePasswordHash`, documented as
+acceptable for both a reset and a `needsRehash` upgrade. That was wrong for the
+upgrade: a rehash happens immediately after a successful verification, so the
+caller *does* know the current hash. Writing unconditionally meant a rehash
+could land after a concurrent password change and **reinstate the old password
+over the new one** — a credential rollback.
+
+The single method is now three, because they differ in both authorization and
+side effects:
+
+| Method | Authorization | Compare-and-set | Stamps `password_updated_at` | Clears lockout |
+| --- | --- | --- | --- | --- |
+| `changePassword` | knows the current password | **required** | yes | yes |
+| `rehashPassword` | just verified the password | **required** | **no** | **no** |
+| `resetPassword` | single-use OTP reset grant | no | yes | yes |
+
+`rehashPassword` not stamping `password_updated_at` matters for you: it stores
+the **same** password under stronger parameters. Stamping it would make every
+user look as though they had just changed their password, corrupting password
+age reporting and any expiry policy built on it (O7).
+
+`resetPassword` has no compare-and-set because the user cannot know their
+current hash — that is the premise of a reset. Its authorization is enforced in
+the application service, which must hold a valid single-use reset grant.
+
+**SQL requirement.** `changePassword` and `rehashPassword` must both be
+conditional updates in a single statement:
+
+```sql
+UPDATE credentials
+   SET password_hash = @newHash
+       -- changePassword only; rehashPassword MUST NOT touch these:
+       , password_updated_at   = SYSUTCDATETIME()
+       , failed_login_attempts = 0
+       , locked_until          = NULL
+ WHERE user_id = @userId
+   AND password_hash = @expectedHash;
+```
+
+Zero rows affected must be distinguished into "no such credential"
+(`RecordNotFoundError`) and "hash mismatch" (`OptimisticLockError`) — a second
+`SELECT` on `user_id` is the usual way. The application treats a mismatch on a
+rehash as "abandon the upgrade", never as "retry".
+
+**Correction 2 — timed lockout removed; lockout is counter-based.**
+
+The first version accepted a `lockDurationMinutes` and set `locked_until`, while
+also treating `failed_login_attempts >= threshold` as locked. Those rules
+contradict: once `locked_until` elapsed the counter was still at the threshold,
+so a "timed" lockout **never actually expired**.
+
+Rather than silently add an automatic unlock — which would weaken the confirmed
+frontend behaviour — the timed half was removed. The implemented policy is now
+one rule:
+
+> A credential is locked when `failed_login_attempts >= threshold`, and stays
+> locked until the counter is explicitly cleared by a password reset or an
+> administrator unlock. There is **no** automatic time-based unlock.
+
+This matches the confirmed frontend, whose lockout message tells the user to
+"unlock via Forgot Password" and which never populates `lockedUntil`.
+
+**What this means for the schema.** Please still include `locked_until`
+(`DATETIMEOFFSET NULL`): it is a confirmed frontend field and the final policy
+is open. **Be aware it will be permanently NULL** under the current
+implementation — nothing writes it. The application honours a *future* value if
+some later policy sets one, but an *elapsed* value never unlocks a credential,
+because the counter governs.
+
+This supersedes **Q-CR3**: `recordFailedAttempt` no longer needs the `CASE`
+expression for `locked_until`. It is now simply:
+
+```sql
+UPDATE credentials
+   SET failed_login_attempts = failed_login_attempts + 1,
+       last_failed_login_at  = SYSUTCDATETIME()
+ OUTPUT inserted.failed_login_attempts, inserted.locked_until
+ WHERE user_id = @userId;
+```
+
+Still one atomic statement, for the same security reason: a
+SELECT-then-UPDATE loses increments under concurrent guessing and turns a
+5-attempt limit into an unlimited one.
+
+**Q-CR9 is now the blocking policy question** and is for the backend lead and
+the business, not for you: permanent lockout until reset (implemented), or a
+timed lockout? Choosing timed also requires deciding what happens to the
+counter when the timer expires — which is precisely the contradiction that was
+removed.
+
+### 15.6 Credential record exposure — a hard rule
+
+A `CredentialRecord` **must never leave the authentication layer**. It is not an
+API DTO. It is never returned from a controller, never placed in a response
+body, never put in an error, and never logged.
+
+Enforcement in the application:
+
+- `UserRepository` exposes no password field, so ordinary user queries cannot
+  select a hash.
+- `toCredentialSecurityView()` is the only credential shape allowed out. It is
+  **structurally incapable** of carrying a hash, because `passwordHash` is not
+  in its type — a controller cannot leak one by forgetting to strip a field. It
+  carries what the confirmed admin screen (`GET /students/:studentId/security`)
+  needs: lockout state, attempt count and password age.
+- `redact()` replaces any value under a key matching `/pass(word)?/` or
+  `/credential/` before it reaches a log, which covers `passwordHash` and a
+  nested `credential` object. That is a last line of defence, not permission.
+- Repository errors carry the entity name, the user id and the field name —
+  never a hash value. Asserted by test across every failing path.
+
+**Implication for you:** if you add views, stored procedures or audit triggers
+over this table, do not project `password_hash` into anything the application
+reads for display, and do not write it into an audit table. If an audit trail of
+password changes is wanted, record the **fact and the timestamp**, never the
+value or the hash.

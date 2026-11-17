@@ -50,12 +50,14 @@ export const API_ERROR_CODES = [
   "BAD_REQUEST",
   "UNAUTHORIZED",
   "UNAUTHENTICATED",
+  "TOKEN_EXPIRED",
   "FORBIDDEN",
   "INSUFFICIENT_ROLE",
   "NOT_FOUND",
   "ROUTE_NOT_FOUND",
   "CONFLICT",
   "TOO_MANY_REQUESTS",
+  "SERVICE_UNAVAILABLE",
   "PAYLOAD_TOO_LARGE",
   "MALFORMED_JSON",
   "INTERNAL_SERVER_ERROR",
@@ -84,6 +86,60 @@ export interface PaginationQuery {
   page: number;
   pageSize: number;
 }
+
+/**
+ * Largest page number accepted.
+ *
+ * Bounded so `page * pageSize` can never leave the safe-integer range:
+ * 1,000,000 x 100 is 1e8, far below `Number.MAX_SAFE_INTEGER`. Without a
+ * cap, a page of 1e18 produces an offset that silently loses precision.
+ */
+export const MAX_PAGE = 1_000_000;
+
+/**
+ * Normalises untrusted pagination input into a usable `PaginationQuery`.
+ *
+ * `Math.trunc` and `Math.max` alone are NOT safe here: `Math.trunc(NaN)` is
+ * `NaN` and `Math.max(1, NaN)` is `NaN`, so a non-numeric page size
+ * propagates into the response as `pageSize: NaN` and `totalPages: NaN`,
+ * which serialise to `null`. `Infinity` survives both as well.
+ *
+ * This is DEFENSIVE normalisation for the service layer, deliberately
+ * distinct from `paginationSchema` in validate.middleware.ts: at the HTTP
+ * edge, out-of-range input is REJECTED with 422, because a client asking
+ * for `pageSize=9999` has a bug worth surfacing. Inside a service the input
+ * may come from another service or a test, and the invariant that matters is
+ * that a response can never contain `NaN`. So the edge validates strictly
+ * and the service clamps.
+ *
+ * Guarantees for any input, including `NaN`, `Infinity`, negatives,
+ * fractions and absurd magnitudes:
+ *   - `page` is a safe integer in [1, MAX_PAGE]
+ *   - `pageSize` is a safe integer in [1, MAX_PAGE_SIZE]
+ */
+export const normalizePagination = (input: Partial<PaginationQuery> = {}): PaginationQuery => {
+  const clamp = (value: unknown, fallback: number, max: number): number => {
+    // Rejects NaN and both infinities in one check; `typeof` keeps strings
+    // and other shapes out even when a caller bypasses the types.
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      return fallback;
+    }
+
+    // Truncate towards zero first, so 2.7 -> 2 and -2.7 -> -2, then clamp.
+    const whole = Math.trunc(value);
+
+    if (whole < 1) {
+      return 1;
+    }
+
+    return whole > max ? max : whole;
+  };
+
+  return {
+    page: clamp(input.page, 1, MAX_PAGE),
+    pageSize: clamp(input.pageSize, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE),
+  };
+};
 
 /** Sort direction. `asc` is the default wherever a sort is supported. */
 export type SortOrder = "asc" | "desc";

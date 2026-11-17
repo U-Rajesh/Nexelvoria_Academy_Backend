@@ -48,9 +48,38 @@ export const STAFF_ROLES = ["teacher", "admin", "super_admin"] as const;
 export const AUTHENTICATED_ROLES = ["student", "teacher", "admin", "super_admin"] as const;
 
 /**
- * The authenticated caller, attached to the request by the (future) auth
- * middleware. Declared here so modules can depend on the shape before
- * authentication is implemented in a later step.
+ * The identity derived from a verified access token.
+ *
+ * Exactly the three claims a token carries about the caller - nothing more.
+ * It is intentionally NOT `AuthenticatedUser`: an access token excludes
+ * email and every other profile field, because a JWT payload is signed but
+ * not encrypted and anything placed there is world-readable (see
+ * token.service.ts). Email is not added to the token just to satisfy a
+ * TypeScript interface.
+ *
+ * `sessionId` is the `sid` claim. It is carried so a future step can check
+ * the session is still live - see "session validation" in
+ * docs/auth-implementation-plan.md. Nothing validates it today.
+ */
+export interface AuthenticatedPrincipal {
+  id: EntityId;
+  role: UserRole;
+  /** The `sid` claim: identifies the session this token was minted for. */
+  sessionId: string;
+}
+
+/**
+ * A richer authenticated caller, including profile fields.
+ *
+ * DEPRECATED AS A REQUEST TYPE, but deliberately left unchanged pending the
+ * backend lead's decision. It cannot be populated from an access token
+ * because `email` is not a claim. Either it is retired in favour of
+ * `AuthenticatedPrincipal`, or it is repurposed as the shape of a
+ * user record loaded from the database when an endpoint genuinely needs the
+ * profile.
+ *
+ * Nothing in the codebase reads `.email` from a request identity today, so
+ * retiring it is a one-line change in three files. See the Step 6D report.
  */
 export interface AuthenticatedUser {
   id: EntityId;

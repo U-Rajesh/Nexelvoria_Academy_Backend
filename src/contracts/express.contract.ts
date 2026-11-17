@@ -1,4 +1,4 @@
-import type { AuthenticatedUser } from "./user.contract";
+import type { AuthenticatedPrincipal, AuthenticatedUser } from "./user.contract";
 
 /**
  * Augments Express's Request with the fields our middleware attaches.
@@ -16,11 +16,27 @@ declare global {
       validatedQuery?: unknown;
 
       /**
-       * The authenticated caller. Set ONLY by the authentication
-       * middleware, which does not exist yet - so this is always
-       * undefined today and role guards fail closed because of it.
+       * The verified caller, derived from the access token.
        *
-       * Never populate this from a request body or header.
+       * Set ONLY by `authenticate` - never from a request body, query
+       * string or header. A client that sends `X-User-Role: super_admin`
+       * is ignored entirely: this field comes from a signed token or it
+       * stays undefined, and the role guards fail closed when it is
+       * undefined.
+       */
+      principal?: AuthenticatedPrincipal;
+
+      /**
+       * DEPRECATED and NOT an authorization identity.
+       *
+       * Nothing populates this - an access token carries no email - and as
+       * of Step 6E the role guards ignore it entirely: setting it does NOT
+       * grant access, and a request carrying it without a `principal` is
+       * logged as an error and denied.
+       *
+       * It remains declared only so code written against it still compiles
+       * while the backend lead and Developer 2 agree on removing it. Use
+       * `principal`.
        */
       user?: AuthenticatedUser;
 
