@@ -1,0 +1,18 @@
+{
+  // Type-checks the test suite with the SAME strict options as the build.
+  //
+  // Needed because tsconfig.json includes only `src/**/*.ts`, so until now
+  // `npm run typecheck` never looked at tests/ - test files could contain
+  // type errors and still pass. This config is noEmit and never builds:
+  // `npm run build` still uses tsconfig.json and emits src/ alone, so test
+  // code and in-memory fakes can never reach dist/.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Widened from "src" because test files live outside it. Harmless
+    // here precisely because nothing is emitted.
+    "rootDir": ".",
+    "outDir": null
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"]
+}
