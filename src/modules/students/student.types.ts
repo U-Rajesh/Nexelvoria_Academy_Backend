@@ -1,3 +1,4 @@
+import type { SortOrder } from "../../contracts/api.contract";
 import type { EntityId, IsoDateTime } from "../../contracts/identifier.contract";
 import type { AccountState } from "../../contracts/user.contract";
 import type { User } from "../users/user.types";
@@ -12,8 +13,43 @@ import type { User } from "../users/user.types";
  * session fields that belong to authentication, which is not designed yet.
  */
 
-/** Approval outcome for a student registration (BR-002). */
-export type AdminApprovalStatus = "pending" | "approved" | "rejected";
+/**
+ * Approval outcome for a student registration (BR-002).
+ * A const array so the zod schemas derive from the same list - the union
+ * is unchanged.
+ */
+export const ADMIN_APPROVAL_STATUSES = ["pending", "approved", "rejected"] as const;
+export type AdminApprovalStatus = (typeof ADMIN_APPROVAL_STATUSES)[number];
+
+/**
+ * The `status` values an admin may SET through
+ * `PATCH /students/:studentId/status` (api-contracts 5 #4: "active /
+ * suspended / deactivated"). A strict subset of `UserStatus`: `pending` is
+ * a valid stored status but is not set by this endpoint, so it is a 422.
+ */
+export const ADMIN_SETTABLE_STUDENT_STATUSES = ["active", "suspended", "deactivated"] as const;
+export type AdminSettableStudentStatus = (typeof ADMIN_SETTABLE_STUDENT_STATUSES)[number];
+
+/**
+ * Sortable student fields - the allow-list every `sortBy` is checked
+ * against (api-contracts 3.6 / 3.8). Approved by the backend lead at
+ * Step 3, Task 3.1.
+ */
+export const STUDENT_SORT_FIELDS = ["name", "createdAt", "passingYear"] as const;
+export type StudentSortField = (typeof STUDENT_SORT_FIELDS)[number];
+
+/** Sort instruction passed to `StudentRepository.findMany`. */
+export interface StudentSort {
+  field: StudentSortField;
+  order: SortOrder;
+}
+
+/**
+ * The approved DEFAULT order when a caller requests none: newest
+ * registrations first. (`id ASC` is always appended as the final
+ * tiebreaker - see the repository port.)
+ */
+export const DEFAULT_STUDENT_SORT: StudentSort = { field: "createdAt", order: "desc" };
 
 /** Gender values, exactly as the frontend declares them. */
 export type Gender = "male" | "female" | "other";
@@ -86,6 +122,13 @@ export interface Student extends User {
 export interface StudentFilter {
   status?: Student["status"];
   approvalStatus?: AdminApprovalStatus;
+  /**
+   * Currently resolved against `student.enrolledCourseIds` (the in-memory
+   * fake does exactly that). Whether that array is stored or derived from
+   * enrolments is UNRESOLVED (database-handoff Q-R1), so this filter's
+   * long-term source of truth - and which enrolment statuses count - is
+   * not yet decided.
+   */
   courseId?: EntityId;
   batchId?: EntityId;
   passingYear?: string;

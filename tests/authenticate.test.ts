@@ -572,13 +572,14 @@ describe("session-aware authentication", () => {
       }
     });
 
-    it("mounts no authenticated endpoints yet", async () => {
+    it("keeps unimplemented auth endpoints absent and student routes protected", async () => {
       const server = await startServer(createApp());
 
       try {
-        for (const path of ["/api/v1/auth/login", "/api/v1/auth/me", "/api/v1/students"]) {
+        for (const path of ["/api/v1/auth/login", "/api/v1/auth/me"]) {
           assert.equal((await server.get(path)).status, 404, `${path} must not exist yet`);
         }
+        assert.equal((await server.get("/api/v1/students")).status, 401);
       } finally {
         await server.close();
       }

@@ -38,10 +38,12 @@ export const createTestHarness = (): TestHarness => {
   const credentials = new InMemoryCredentialRepository();
   const sessions = new InMemorySessionRepository();
   const users = new InMemoryUserRepository();
-  const students = new InMemoryStudentRepository();
+  const enrollments = new InMemoryEnrollmentRepository();
+  // Connected to the enrolment fake so `filter.batchId` resolves through
+  // enrolment data, as a real adapter's join would (Task 3.1, Option A).
+  const students = new InMemoryStudentRepository(enrollments);
   const teachers = new InMemoryTeacherRepository();
   const courses = new InMemoryCourseRepository();
-  const enrollments = new InMemoryEnrollmentRepository();
 
   const container = createContainer({
     credentials: () => credentials,

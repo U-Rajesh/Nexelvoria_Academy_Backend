@@ -6,6 +6,7 @@ import type {
   CreateStudentInput,
   Student,
   StudentFilter,
+  StudentSort,
   UpdateStudentInput,
 } from "./student.types";
 
@@ -31,8 +32,23 @@ export interface StudentRepository {
   /**
    * Paginated list. Backs `GET /students` (admin) and the approvals view
    * via `filter.approvalStatus = "pending"`.
+   *
+   * `filter.batchId` means "has an enrolment in that batch" - batch
+   * membership lives on the enrolment, not the student, so an adapter
+   * joins to enrolments to satisfy it.
+   *
+   * `sort` is OPTIONAL (added at Step 3, Task 3.1; backward compatible).
+   * When given, its field has already been checked against
+   * `STUDENT_SORT_FIELDS` by the service. When OMITTED, the approved
+   * default applies: `createdAt DESC`. In every case `id ASC` is the final
+   * tiebreaker, so OFFSET/FETCH paging never repeats or skips rows
+   * (database-handoff Q-I1).
    */
-  findMany(filter: StudentFilter, pagination: PaginationQuery): Promise<PaginatedResult<Student>>;
+  findMany(
+    filter: StudentFilter,
+    pagination: PaginationQuery,
+    sort?: StudentSort,
+  ): Promise<PaginatedResult<Student>>;
 
   /**
    * Creates a student.

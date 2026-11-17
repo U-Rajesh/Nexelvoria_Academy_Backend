@@ -9,6 +9,9 @@ build/
 .env
 .env.*
 !.env.example
+# Test config is committed so a fresh clone can run `npm test`. It must hold
+# no secrets - enforced by tests/env-test-config.test.ts.
+!.env.test
 
 # Logs
 *.log
