@@ -9,6 +9,7 @@ import {
   type RegistrationResult,
   type RegistrationService,
 } from "../src/modules/auth/registration.service";
+import type { StudentRepository } from "../src/modules/students/student.repository";
 import type { UserRepository } from "../src/modules/users/user.repository";
 import { describeError } from "../src/utils/redact";
 import { createTestHarness, type TestHarness } from "./fakes";
@@ -62,16 +63,22 @@ describe("registration service", () => {
 
   beforeEach(() => {
     h = createTestHarness();
-    service = createRegistrationService({ users: h.users, credentials: h.credentials });
+    service = createRegistrationService({
+      users: h.users,
+      credentials: h.credentials,
+      students: h.students,
+    });
   });
 
   const serviceWith = (overrides: {
     users?: UserRepository;
     credentials?: CredentialRepository;
+    students?: StudentRepository;
   }): RegistrationService =>
     createRegistrationService({
       users: overrides.users ?? h.users,
       credentials: overrides.credentials ?? h.credentials,
+      students: overrides.students ?? h.students,
     });
 
   const expectFailure = (
@@ -584,6 +591,321 @@ describe("registration service", () => {
 
     it("describeError is what keeps driver text out", () => {
       assert.equal(describeError(new Error("Server=db-prod-01;Password=secret;")), "Error");
+    });
+  });
+
+  /**
+   * Step 6K-2: the student PROFILE half of registration.
+   *
+   * Registration now writes three records - user, credential and student
+   * profile - and the profile is keyed by the user's own id. These tests
+   * assert the OBSERVABLE contract, including on partial failure. They
+   * deliberately do NOT simulate a rollback: the writes are not atomic, and
+   * a test that pretended otherwise would prove something false.
+   */
+  describe("student profile creation (Step 6K-2)", () => {
+    /** Fails every `createForUser`, leaving user + credential written. */
+    const brokenProfiles = (): StudentRepository =>
+      withOverrides<StudentRepository>(h.students, {
+        createForUser: () => {
+          throw new Error("profile store unavailable");
+        },
+      });
+
+    describe("successful registration", () => {
+      it("creates a user, a credential AND a student profile", async () => {
+        const { data } = expectSuccess(await service.register(validInput()));
+
+        assert.ok(await h.users.findById(data.tempStudentId), "user exists");
+        assert.ok(await h.credentials.findByUserId(data.tempStudentId), "credential exists");
+        assert.ok(await h.students.findById(data.tempStudentId), "student profile exists");
+        assert.equal(h.students.count, 1);
+      });
+
+      it("keeps Student.id === User.id end to end", async () => {
+        const { data } = expectSuccess(await service.register(validInput()));
+
+        const user = await h.users.findById(data.tempStudentId);
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(user);
+        assert.ok(student);
+        assert.equal(student.id, user.id, "the shared primary key (Q25 Option A)");
+        // The response id IS the shared key, so the frontend's
+        // `tempStudentId` resolves both records.
+        assert.equal(data.tempStudentId, user.id);
+      });
+
+      it("persists every admissions field exactly as submitted", async () => {
+        const { data } = expectSuccess(await service.register(validInput()));
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(student);
+        assert.equal(student.collegeName, "Nexelvoria Institute of Technology");
+        assert.equal(student.degreeBranch, "B.Tech CSE");
+        assert.equal(student.passingYear, "2026");
+        assert.equal(student.courseInterestedIn, "Java Full Stack");
+        assert.equal(student.dateOfBirth, "2004-05-10");
+        assert.equal(student.gender, "female");
+        assert.equal(student.fullAddress, "12 Cyber Towers, Hyderabad 500081");
+        assert.equal(student.guardianContact, "9876500000");
+      });
+
+      it("applies the server-owned defaults", async () => {
+        const { data } = expectSuccess(await service.register(validInput()));
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(student);
+        assert.equal(student.role, "student");
+        assert.equal(student.isEmailVerified, false, "BR-001 starts unverified");
+        assert.equal(student.isMobileVerified, false, "BR-001 starts unverified");
+        assert.equal(student.adminApprovalStatus, "pending", "BR-002 starts pending");
+        assert.deepEqual(student.enrolledCourseIds, []);
+        // No fabricated lifecycle value - the mapping is not a confirmed rule.
+        assert.equal("accountState" in student, false);
+      });
+
+      it("takes identity from the user record, not from the profile input", async () => {
+        const { data } = expectSuccess(await service.register(validInput()));
+
+        const user = await h.users.findById(data.tempStudentId);
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(user);
+        assert.ok(student);
+        assert.equal(student.name, user.name);
+        assert.equal(student.email, user.email);
+        assert.equal(student.email, "ananya@test.local", "normalised to lowercase");
+        assert.equal(student.mobile, user.mobile);
+        assert.equal(student.status, "pending");
+        assert.equal(student.createdAt, user.createdAt);
+      });
+
+      it("stores the optional profile links when supplied", async () => {
+        const { data } = expectSuccess(
+          await service.register(
+            validInput({
+              linkedInUrl: "https://linkedin.com/in/ananya",
+              githubUrl: "https://github.com/ananya",
+              resumeFileName: "ananya-cv.pdf",
+              resumeFileSize: "182kb",
+            }),
+          ),
+        );
+
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(student);
+        assert.equal(student.linkedInUrl, "https://linkedin.com/in/ananya");
+        assert.equal(student.githubUrl, "https://github.com/ananya");
+        assert.equal(student.resumeFileName, "ananya-cv.pdf");
+        assert.equal(student.resumeFileSize, "182kb");
+      });
+
+      it("omits optional fields submitted as empty strings (D-A)", async () => {
+        // The frontend submits an untouched URL input as "". Storing that
+        // would put `linkedInUrl: ""` into every API response.
+        const { data } = expectSuccess(
+          await service.register(validInput({ linkedInUrl: "", githubUrl: "" })),
+        );
+
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(student);
+        assert.equal("linkedInUrl" in student, false, "absent, not an empty string");
+        assert.equal("githubUrl" in student, false, "absent, not an empty string");
+      });
+
+      it("omits optional fields that were never supplied", async () => {
+        const { data } = expectSuccess(await service.register(validInput()));
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(student);
+        for (const field of ["linkedInUrl", "githubUrl", "resumeFileName", "resumeFileSize"]) {
+          assert.equal(field in student, false, `${field} must be absent`);
+        }
+        // Never collected at registration - file storage is unresolved (Q11).
+        assert.equal("resumeUrl" in student, false);
+      });
+
+      it("writes no field the whitelist does not name", async () => {
+        const { data } = expectSuccess(
+          await service.register(
+            validInput({ resumeUrl: "https://evil.test/x", smuggled: "nope" }),
+          ),
+        );
+
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.ok(student);
+        assert.equal("resumeUrl" in student, false, "not accepted from the payload");
+        assert.equal("smuggled" in student, false);
+      });
+    });
+
+    describe("profile creation failure", () => {
+      it("reports profile_incomplete and NEVER success", async () => {
+        const result = await serviceWith({ students: brokenProfiles() }).register(validInput());
+
+        const failure = expectFailure(result);
+        assert.equal(failure.reason, "profile_incomplete");
+        assert.notEqual(result.outcome, "success");
+      });
+
+      it("leaves the user and credential in place - the real partial state", async () => {
+        // Documented, not hidden: the writes are not atomic, so the first
+        // two records genuinely survive.
+        await serviceWith({ students: brokenProfiles() }).register(validInput());
+
+        const user = await h.users.findByEmail("ananya@test.local");
+        assert.ok(user, "the user was created and still exists");
+        assert.ok(await h.credentials.findByUserId(user.id), "the credential also exists");
+      });
+
+      it("writes no student profile", async () => {
+        await serviceWith({ students: brokenProfiles() }).register(validInput());
+
+        assert.equal(h.students.count, 0, "no partial profile row");
+      });
+
+      it("leaks no hash, token or password in the failure", async () => {
+        const result = await serviceWith({ students: brokenProfiles() }).register(validInput());
+        const serialised = JSON.stringify(result);
+
+        assert.equal(serialised.includes(PASSWORD), false, "never the password");
+        assert.equal(serialised.includes("$argon2"), false, "never a hash");
+        assert.equal(serialised.includes("profile store unavailable"), false, "never driver text");
+        // A failure carries only outcome + reason.
+        assert.deepEqual(Object.keys(result).sort(), ["outcome", "reason"]);
+      });
+
+      it("is recoverable: createForUser succeeds afterwards", async () => {
+        await serviceWith({ students: brokenProfiles() }).register(validInput());
+
+        const user = await h.users.findByEmail("ananya@test.local");
+        assert.ok(user);
+
+        // The working repository can complete what the broken one could not.
+        const student = await h.students.createForUser(user.id, {
+          collegeName: "Nexelvoria Institute of Technology",
+          degreeBranch: "B.Tech CSE",
+          passingYear: "2026",
+          courseInterestedIn: "Java Full Stack",
+          dateOfBirth: "2004-05-10",
+          gender: "female",
+          fullAddress: "12 Cyber Towers, Hyderabad 500081",
+        });
+
+        assert.equal(student.id, user.id, "still the shared key");
+      });
+
+      it("reports SUCCESS when the write errored but actually committed", async () => {
+        // A timeout that commits is indistinguishable from one that does
+        // not, so the service confirms by reading rather than guessing.
+        const flaky = withOverrides<StudentRepository>(h.students, {
+          async createForUser(userId, profile) {
+            await h.students.createForUser(userId, profile);
+            throw new Error("connection reset after commit");
+          },
+        });
+
+        const { data } = expectSuccess(
+          await serviceWith({ students: flaky }).register(validInput()),
+        );
+
+        const student = await h.students.findById(data.tempStudentId);
+        assert.ok(student, "the profile really is there");
+        assert.equal(student.id, data.tempStudentId);
+      });
+
+      it("reports profile_incomplete when the confirming read also fails", async () => {
+        // Fail closed: an outcome that cannot be established is never
+        // reported as success.
+        const blind = withOverrides<StudentRepository>(h.students, {
+          createForUser: () => {
+            throw new Error("write failed");
+          },
+          findById: () => {
+            throw new Error("read failed too");
+          },
+        });
+
+        const failure = expectFailure(
+          await serviceWith({ students: blind }).register(validInput()),
+        );
+
+        assert.equal(failure.reason, "profile_incomplete");
+      });
+    });
+
+    describe("existing guards still write no profile", () => {
+      it("creates no profile for a duplicate email", async () => {
+        expectSuccess(await service.register(validInput()));
+        assert.equal(h.students.count, 1);
+
+        const failure = expectFailure(
+          await service.register(validInput({ mobile: "9876543211" })),
+        );
+
+        assert.equal(failure.reason, "email_taken");
+        assert.equal(h.students.count, 1, "no second profile");
+      });
+
+      it("creates no profile for a duplicate mobile", async () => {
+        expectSuccess(await service.register(validInput()));
+
+        const failure = expectFailure(
+          await service.register(validInput({ email: "other@test.local" })),
+        );
+
+        assert.equal(failure.reason, "mobile_taken");
+        assert.equal(h.students.count, 1, "no second profile");
+      });
+
+      it("creates no profile when validation fails", async () => {
+        const failure = expectFailure(await service.register(validInput({ collegeName: "" })));
+
+        assert.equal(failure.reason, "validation_failed");
+        assert.equal(h.students.count, 0);
+        assert.equal(h.users.count, 0);
+      });
+
+      it("creates no profile when the credential write fails", async () => {
+        const broken = withOverrides<CredentialRepository>(h.credentials, {
+          create: () => {
+            throw new Error("credential store down");
+          },
+        });
+
+        const failure = expectFailure(
+          await serviceWith({ credentials: broken }).register(validInput()),
+        );
+
+        assert.equal(failure.reason, "incomplete", "distinct from profile_incomplete");
+        assert.equal(h.students.count, 0, "stage 6 is never reached");
+      });
+
+      it("still refuses a role supplied in the payload", async () => {
+        const { data } = expectSuccess(
+          await service.register(validInput({ role: "admin" })),
+        );
+
+        const user = await h.users.findById(data.tempStudentId);
+        const student = await h.students.findById(data.tempStudentId);
+
+        assert.equal(user?.role, "student");
+        assert.equal(student?.role, "student");
+      });
+
+      it("still stores a verifiable argon2id hash, never the password", async () => {
+        const { data } = expectSuccess(await service.register(validInput()));
+        const credential = await h.credentials.findByUserId(data.tempStudentId);
+
+        assert.ok(credential);
+        assert.ok(credential.passwordHash.startsWith("$argon2id$"));
+        assert.notEqual(credential.passwordHash, PASSWORD);
+        assert.equal((await verifyPassword(credential.passwordHash, PASSWORD)).valid, true);
+      });
     });
   });
 });

@@ -40,8 +40,10 @@ export const createTestHarness = (): TestHarness => {
   const users = new InMemoryUserRepository();
   const enrollments = new InMemoryEnrollmentRepository();
   // Connected to the enrolment fake so `filter.batchId` resolves through
-  // enrolment data, as a real adapter's join would (Task 3.1, Option A).
-  const students = new InMemoryStudentRepository(enrollments);
+  // enrolment data, as a real adapter's join would (Task 3.1, Option A), and
+  // to the user fake so `createForUser` can read the identity half of a
+  // student from the user row - the same join a SQL adapter will do (6K-1).
+  const students = new InMemoryStudentRepository(enrollments, users);
   const teachers = new InMemoryTeacherRepository();
   const courses = new InMemoryCourseRepository();
 

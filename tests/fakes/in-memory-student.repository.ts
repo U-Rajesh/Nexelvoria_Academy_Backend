@@ -9,10 +9,15 @@ import {
   type CreateStudentInput,
   type Student,
   type StudentFilter,
+  type StudentProfileInput,
   type StudentSort,
   type UpdateStudentInput,
 } from "../../src/modules/students/student.types";
-import { DuplicateRecordError } from "../../src/repositories/repository.errors";
+import type { UserRepository } from "../../src/modules/users/user.repository";
+import {
+  DuplicateRecordError,
+  RecordNotFoundError,
+} from "../../src/repositories/repository.errors";
 import {
   InMemoryStore,
   containsIgnoreCase,
@@ -36,6 +41,21 @@ import {
  * class, so this test-only wiring adds no production coupling.
  */
 export type BatchMembershipSource = Pick<EnrollmentRepository, "findMany">;
+
+/**
+ * Where the fake reads the IDENTITY half of a student for `createForUser`.
+ *
+ * `Student extends User`, so a student row needs `name`, `email`, `mobile`,
+ * `status`, `avatarUrl` and `createdAt` - and those live on the user record,
+ * in a separate store with its own id sequence. `StudentProfileInput`
+ * deliberately does not carry them, so the fake must read the user row, which
+ * is exactly the join a real SQL adapter will perform.
+ *
+ * Typed as a narrow slice of the PORT, not the fake class, so this test-only
+ * wiring adds no production coupling - the same approach as
+ * `BatchMembershipSource` above.
+ */
+export type UserIdentitySource = Pick<UserRepository, "findById">;
 
 /** Compares two sort keys case-insensitively (approximates SQL Server CI collation). */
 const compareText = (a: string, b: string): number =>
@@ -61,11 +81,16 @@ export class InMemoryStudentRepository implements StudentRepository {
   private readonly store = new InMemoryStore<Student>("student");
 
   /**
-   * `enrollments` is optional so existing standalone constructions keep
-   * working. `createTestHarness()` always connects it. Without it, a
-   * `batchId` filter THROWS rather than being silently ignored.
+   * Both dependencies are optional so existing standalone constructions keep
+   * working. `createTestHarness()` always connects both. Without them the
+   * operation that needs one THROWS rather than being silently ignored: a
+   * `batchId` filter without `enrollments`, and `createForUser` without
+   * `users`.
    */
-  constructor(private readonly enrollments?: BatchMembershipSource) {}
+  constructor(
+    private readonly enrollments?: BatchMembershipSource,
+    private readonly users?: UserIdentitySource,
+  ) {}
 
   // --- test helpers ------------------------------------------------------
 
@@ -192,6 +217,76 @@ export class InMemoryStudentRepository implements StudentRepository {
       isMobileVerified: false,
       adminApprovalStatus: "pending",
       enrolledCourseIds: [],
+    };
+
+    return this.store.set(student);
+  }
+
+  /**
+   * Registration path (Step 6K-1): the profile for an existing user, keyed by
+   * that user's own id.
+   *
+   * Mirrors what a SQL adapter will do - read the user row (a join), then
+   * insert a student row under the SAME key. `this.store.nextId()` is never
+   * called here, and that absence is what enforces `Student.id === User.id`.
+   */
+  async createForUser(userId: EntityId, profile: StudentProfileInput): Promise<Student> {
+    if (this.users === undefined) {
+      throw new Error(
+        "InMemoryStudentRepository: createForUser needs a user source. " +
+          "Use createTestHarness(), or pass the user fake to the constructor.",
+      );
+    }
+
+    const user = await this.users.findById(userId);
+
+    if (user === null) {
+      throw new RecordNotFoundError("user", userId);
+    }
+
+    // A plain Error, deliberately NOT a RepositoryError: the role is fixed
+    // server-side when registration creates the user, so a mismatch is a bug
+    // in the caller, and it must never be "resolved" by relabelling a
+    // teacher or an admin as a student.
+    if (user.role !== "student") {
+      throw new Error(
+        `Refusing to create a student profile for user ${userId}: the user's ` +
+          `role is "${user.role}", not "student". A non-student user must ` +
+          "never be converted into a student.",
+      );
+    }
+
+    // Check and insert in ONE synchronous block, with no `await` between
+    // them - the same discipline as InMemoryUserRepository.create. Every
+    // await is a microtask boundary, so an await here would leave a race
+    // that two concurrent calls could both win, which a SQL PRIMARY KEY
+    // cannot have.
+    if (this.store.has(userId)) {
+      throw new DuplicateRecordError("student", "userId", userId);
+    }
+
+    const student: Student = {
+      ...profile,
+
+      // --- THE INVARIANT: the user's id, never a fresh one ---
+      id: userId,
+
+      // --- identity, from the USER row and never from the input ---
+      name: user.name,
+      email: user.email,
+      mobile: user.mobile,
+      status: user.status,
+      ...(user.avatarUrl === undefined ? {} : { avatarUrl: user.avatarUrl }),
+      createdAt: user.createdAt,
+
+      // --- server owned, exactly as `create` sets them ---
+      role: "student",
+      isEmailVerified: false,
+      isMobileVerified: false,
+      adminApprovalStatus: "pending",
+      enrolledCourseIds: [],
+
+      // `accountState` is deliberately left unset - see StudentProfileInput.
     };
 
     return this.store.set(student);

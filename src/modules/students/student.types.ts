@@ -150,6 +150,62 @@ export type CreateStudentInput = Omit<
   | "adminApprovalRemarks"
 >;
 
+/**
+ * Fields accepted when creating a student PROFILE for a user that ALREADY
+ * EXISTS - see `StudentRepository.createForUser`. This is the registration
+ * path (Step 6K).
+ *
+ * Unlike `CreateStudentInput` above, which creates a standalone student and
+ * therefore carries the identity itself, this type carries the ADMISSIONS
+ * DATA ONLY. Three groups are deliberately excluded.
+ *
+ * 1. IDENTITY - `id`, `name`, `email`, `mobile`, `role`, `status`,
+ *    `avatarUrl`, `createdAt`. Owned by the USER record, which is the single
+ *    source of truth, and read from there by `createForUser`. Accepting them
+ *    here would mean two places to keep in step, and would force the write
+ *    to re-check the email and mobile uniqueness the user row already holds
+ *    - which would throw a duplicate on the very identifiers registration
+ *    just reserved for this same person.
+ *
+ * 2. VERIFICATION AND APPROVAL - `isEmailVerified`, `isMobileVerified`,
+ *    `adminApprovalStatus`, `adminApprovalRemarks`, `approvedAt`. Server
+ *    owned, so a caller can never self-verify (BR-001) or self-approve
+ *    (BR-002).
+ *
+ * 3. `enrolledCourseIds` and `accountState`. Enrolments start empty.
+ *    `accountState` is left UNSET rather than defaulted, for exactly the
+ *    reason `setStudentStatus` leaves it alone (student.service.ts): the
+ *    mapping between `status`, `adminApprovalStatus` and `accountState` is
+ *    not a confirmed business rule. The field is optional on `Student`, so
+ *    absent is valid; inventing a value would hard-code a guess into every
+ *    adapter and into the admin list badge that reads it.
+ *
+ * Derived with `Omit` rather than written out by hand, so it cannot drift
+ * from `Student` - the same approach as `CreateStudentInput` and
+ * `UpdateStudentInput`.
+ */
+export type StudentProfileInput = Omit<
+  Student,
+  // identity - owned by the user record
+  | "id"
+  | "name"
+  | "email"
+  | "mobile"
+  | "role"
+  | "status"
+  | "avatarUrl"
+  | "createdAt"
+  // verification and approval - server owned
+  | "isEmailVerified"
+  | "isMobileVerified"
+  | "adminApprovalStatus"
+  | "adminApprovalRemarks"
+  | "approvedAt"
+  // lifecycle - deliberately not defaulted; see note 3 above
+  | "accountState"
+  | "enrolledCourseIds"
+>;
+
 /** Fields a student may change on their own profile. */
 export type UpdateStudentInput = Partial<
   Pick<
