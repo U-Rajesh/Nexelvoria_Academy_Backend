@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 
 import { requireAdmin } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
@@ -38,58 +38,72 @@ import {
  * exist: adding `teacher` to these guards without the allocation check
  * would let every teacher edit every course the day authentication lands.
  *
- * Until Developer 1 ships authentication, nothing sets `req.user`, so every
- * management route answers 401 in the real application. That is intended.
+ * Middleware order on EVERY management route, each failing closed:
+ *   authenticate  -> WHO is calling     (401; 503 if sessions are unavailable)
+ *   requireAdmin  -> MAY they do this   (403)
+ *   validate      -> is the input valid (422)
+ * An anonymous caller therefore gets 401, never a 422 describing the input.
  *
- * Middleware order per route: GUARD FIRST, then validate. An anonymous
- * caller must get 401 - never a 422 that describes the expected input.
+ * `authenticate` is REQUIRED, not optional: `requireAdmin` reads only
+ * `req.principal`, which only `authenticate` sets. Before this was wired,
+ * every management route answered 401 even to a valid admin token. Making
+ * it a required dependency means a router can never again be built without
+ * it. The public routes deliberately do NOT run it - they stay anonymous.
  */
-export const createCourseRoutes = (deps: CourseServiceDeps): Router => {
+export interface CourseRoutesDeps extends CourseServiceDeps {
+  /** The existing `createAuthenticate` middleware, built in src/routes/index.ts. */
+  authenticate: RequestHandler;
+}
+
+export const createCourseRoutes = (deps: CourseRoutesDeps): Router => {
   const controller = createCourseController(createCourseService(deps));
   const router = Router();
+
+  /** authenticate -> requireAdmin, applied identically to all 7 management routes. */
+  const adminOnly: RequestHandler[] = [deps.authenticate, requireAdmin];
 
   // --- static `/manage` paths: MUST be registered before `/:slug` ----------
   // Otherwise Express matches "manage" as a slug. "manage" is also a
   // reserved slug (RESERVED_COURSE_SLUGS), so no course can shadow it.
   router.get(
     "/manage",
-    requireAdmin,
+    ...adminOnly,
     validate({ query: manageCourseListQuerySchema }),
     controller.listManaged,
   );
 
   router.get(
     "/manage/:courseId",
-    requireAdmin,
+    ...adminOnly,
     validate({ params: courseIdParamsSchema }),
     controller.getManagedById,
   );
 
-  // --- public ----------------------------------------------------------------
+  // --- public: anonymous, no authenticate ------------------------------------
   router.get("/", validate({ query: publicCourseListQuerySchema }), controller.listPublic);
 
   router.get("/:slug", validate({ params: courseSlugParamsSchema }), controller.getPublicBySlug);
 
   // --- management writes -----------------------------------------------------
-  router.post("/", requireAdmin, validate({ body: createCourseBodySchema }), controller.create);
+  router.post("/", ...adminOnly, validate({ body: createCourseBodySchema }), controller.create);
 
   router.patch(
     "/:courseId",
-    requireAdmin,
+    ...adminOnly,
     validate({ params: courseIdParamsSchema, body: updateCourseBodySchema }),
     controller.update,
   );
 
   router.put(
     "/:courseId/curriculum",
-    requireAdmin,
+    ...adminOnly,
     validate({ params: courseIdParamsSchema, body: curriculumBodySchema }),
     controller.replaceCurriculum,
   );
 
   router.patch(
     "/:courseId/status",
-    requireAdmin,
+    ...adminOnly,
     validate({ params: courseIdParamsSchema, body: courseStatusBodySchema }),
     controller.setStatus,
   );
@@ -97,7 +111,7 @@ export const createCourseRoutes = (deps: CourseServiceDeps): Router => {
   // No body schema: the toggle reads no client input beyond the id.
   router.patch(
     "/:courseId/publish",
-    requireAdmin,
+    ...adminOnly,
     validate({ params: courseIdParamsSchema }),
     controller.togglePublish,
   );

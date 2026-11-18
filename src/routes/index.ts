@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import type { AppContainer } from "../container/container";
+import { createAuthenticate } from "../middleware/authenticate.middleware";
 import { createCourseRoutes } from "../modules/courses/course.routes";
 import { healthRoutes } from "../modules/health/health.routes";
 import { createStudentRoutes } from "../modules/students/student.routes";
@@ -41,6 +42,14 @@ export const createApiV1Router = (container: AppContainer): Router => {
       get courses() {
         return container.repositories.courses;
       },
+      // The existing authentication middleware, unchanged, applied by the
+      // course router to its 7 management routes only (public routes stay
+      // anonymous). Its `sessions` dependency is a lazy resolver, so nothing
+      // is resolved at boot: with no session adapter registered, a request
+      // carrying a token gets 503 and one without gets 401 - fail closed.
+      authenticate: createAuthenticate({
+        sessions: () => container.repositories.sessions,
+      }),
     }),
   );
   // router.use("/enrollments", ...);
