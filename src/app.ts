@@ -1,4 +1,4 @@
-import express, { type Application } from "express";
+import express, { type Application, type Router } from "express";
 import cors from "cors";
 import helmet from "helmet";
 
@@ -44,6 +44,23 @@ export interface CreateAppOptions {
    * exist yet. Tests pass a container backed by in-memory fakes.
    */
   container?: AppContainer;
+
+  /**
+   * Extra routes to mount under `/api/v1`, after the registered modules and
+   * BEFORE the 404 handler.
+   *
+   * Exists for ONE reason: a router added to the returned app would sit
+   * behind `notFoundHandler` and never be reached, so a local harness cannot
+   * extend the real application from outside without this seam.
+   *
+   * PRODUCTION PASSES NOTHING. `src/server.ts` calls `createApp()` with no
+   * options, so this is inert there. It is NOT a place to register a feature
+   * module - those belong in `src/routes/index.ts`, which is the only route
+   * registry. Today its single caller is `dev/server.dev.ts`, the
+   * development-only Student Registration harness, which is excluded from the
+   * build (see dev/guard.dev.ts).
+   */
+  extraV1Routes?: Router;
 }
 
 export const createApp = (options: CreateAppOptions = {}): Application => {
@@ -83,7 +100,7 @@ export const createApp = (options: CreateAppOptions = {}): Application => {
   app.use(express.urlencoded({ extended: true, limit: env.BODY_LIMIT }));
 
   // 7. Versioned API routes, built over the injected dependencies.
-  app.use("/api/v1", createApiV1Router(container));
+  app.use("/api/v1", createApiV1Router(container, options.extraV1Routes));
 
   // 8. Unmatched route -> 404 via the error pipeline.
   app.use(notFoundHandler);
