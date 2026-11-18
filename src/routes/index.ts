@@ -1,9 +1,11 @@
 import { Router } from "express";
 
 import type { AppContainer } from "../container/container";
+import { createAuthenticate } from "../middleware/authenticate.middleware";
 import { createCourseRoutes } from "../modules/courses/course.routes";
 import { healthRoutes } from "../modules/health/health.routes";
 import { createStudentRoutes } from "../modules/students/student.routes";
+import { createTeacherRoutes } from "../modules/teachers/teacher.routes";
 
 /**
  * The API v1 route registry - the ONLY place module routers are mounted.
@@ -52,7 +54,21 @@ export const createApiV1Router = (container: AppContainer): Router => {
       },
     }),
   );
-  // router.use("/teachers", ...);
+  router.use(
+    "/teachers",
+    createTeacherRoutes({
+      get teachers() {
+        return container.repositories.teachers;
+      },
+      // The existing authentication middleware, unchanged. Its `sessions`
+      // dependency is already a lazy resolver, so nothing is resolved at
+      // boot: with no session adapter registered, a request carrying a
+      // token gets 503 and one without a token gets 401 - fail closed.
+      authenticate: createAuthenticate({
+        sessions: () => container.repositories.sessions,
+      }),
+    }),
+  );
 
   return router;
 };
