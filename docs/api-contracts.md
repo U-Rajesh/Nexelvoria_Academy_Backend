@@ -396,6 +396,15 @@ POST /students/:studentId/reject
 - Résumé upload needs a storage decision — Q11.
 - Dependencies: `enrollments` (direct enrolment on create), `auth` (lockout
   state), `admin` (audit log).
+- **`PATCH /students/:studentId/status` (implemented, Task 3.2).** Body
+  `{ "status": "active" | "suspended" | "deactivated" }`; `pending` and any
+  other value is `422`; unknown student `404`; returns `StudentProfile`.
+  **Writes `status` only — `accountState` is not changed** (approved D1,
+  Option A).
+  *Integration concern:* the frontend mock also rewrites `accountState` on a
+  status change, and the admin list badge reads `accountState`, so the badge
+  will not reflect a suspension until the `status`/`accountState` business
+  rules are confirmed during frontend-backend integration.
 
 ---
 
@@ -959,6 +968,7 @@ twice and inconsistently.
 | **BR-015** manual meeting links | batches, teachers | No calendar integration; link is free text, so it must be URL-validated. |
 | **Financial override** | super-admin, payments, enrollments | Approval grants free course access, bypassing payment. |
 | **Audit trail** | every module | Every mutating staff action writes an `AuditLogEntry`. Cross-cutting: belongs in middleware or a shared service, **not** re-implemented per module. |
+| **Suspended / deactivated students cannot log in** | students, auth | **Requirement for Developer 1 (auth), recorded at Task 3.2.** `students` sets `status` (`PATCH /students/:studentId/status`); the real login flow must **explicitly refuse both `suspended` and `deactivated`** students, checking `status` (which is what the status endpoint writes — `accountState` is not updated). Note the frontend mock's student login checks `suspended` but **not** `deactivated`, so the mock must not be copied as-is. |
 
 **Recommended seam for the audit trail:** a shared service called from domain
 services (not middleware), because only the service knows the business meaning

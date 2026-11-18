@@ -5,6 +5,7 @@ import type {
   Course,
   CourseFilter,
   CourseModule,
+  CourseSort,
   CourseStatus,
   CreateCourseInput,
   Lesson,
@@ -17,6 +18,26 @@ import {
   equalsIgnoreCase,
   paginate,
 } from "./in-memory-store";
+
+/**
+ * Orders two courses by an allow-listed field.
+ *
+ * Strings compare case-insensitively, mirroring SQL Server's default
+ * CI collation (open-questions Q17). `Array.prototype.sort` is stable, so
+ * ties keep insertion order - the fake's equivalent of the id tiebreaker a
+ * real adapter must append (database-handoff Q-I1).
+ */
+const compareCourses = (a: Course, b: Course, sort: CourseSort): number => {
+  const left = a[sort.field];
+  const right = b[sort.field];
+
+  const result =
+    typeof left === "string" && typeof right === "string"
+      ? left.toLowerCase().localeCompare(right.toLowerCase())
+      : Number(left) - Number(right);
+
+  return sort.order === "desc" ? -result : result;
+};
 
 /** TEST-ONLY in-memory `CourseRepository`. See in-memory-store.ts. */
 export class InMemoryCourseRepository implements CourseRepository {
@@ -49,6 +70,7 @@ export class InMemoryCourseRepository implements CourseRepository {
   async findMany(
     filter: CourseFilter,
     pagination: PaginationQuery,
+    sort?: CourseSort,
   ): Promise<PaginatedResult<Course>> {
     const rows = this.store.filter((course) => {
       // The public catalogue sets publishedOnly; drafts must never leak.
@@ -78,6 +100,12 @@ export class InMemoryCourseRepository implements CourseRepository {
       return true;
     });
 
+    // No sort: insertion order, unchanged from before `sort` existed, so
+    // existing callers and tests behave exactly as they did.
+    if (sort !== undefined) {
+      rows.sort((a, b) => compareCourses(a, b, sort));
+    }
+
     return paginate(rows, pagination);
   }
 
@@ -105,6 +133,21 @@ export class InMemoryCourseRepository implements CourseRepository {
 
     // A full replace, matching the port contract - not a merge.
     return this.store.set({ ...existing, modules: structuredClone(modules) });
+  }
+
+  async setPublication(
+    id: EntityId,
+    change: { status: CourseStatus; isPublished: boolean },
+  ): Promise<Course> {
+    const existing = this.store.getOrThrow(id);
+
+    // One store write carrying both fields - the fake's equivalent of the
+    // single atomic UPDATE the port requires.
+    return this.store.set({
+      ...existing,
+      status: change.status,
+      isPublished: change.isPublished,
+    });
   }
 
   async setStatus(id: EntityId, status: CourseStatus): Promise<Course> {

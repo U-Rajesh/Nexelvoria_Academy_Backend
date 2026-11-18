@@ -1,13 +1,16 @@
 import type { PaginatedResult, PaginationQuery } from "../../src/contracts/api.contract";
 import type { EntityId } from "../../src/contracts/identifier.contract";
 import type { UserStatus } from "../../src/contracts/user.contract";
+import type { EnrollmentRepository } from "../../src/modules/enrollments/enrollment.repository";
 import type { StudentRepository } from "../../src/modules/students/student.repository";
-import type {
-  ApprovalDecision,
-  CreateStudentInput,
-  Student,
-  StudentFilter,
-  UpdateStudentInput,
+import {
+  DEFAULT_STUDENT_SORT,
+  type ApprovalDecision,
+  type CreateStudentInput,
+  type Student,
+  type StudentFilter,
+  type StudentSort,
+  type UpdateStudentInput,
 } from "../../src/modules/students/student.types";
 import { DuplicateRecordError } from "../../src/repositories/repository.errors";
 import {
@@ -24,8 +27,45 @@ import {
  * gains a method, this file stops compiling, so the fakes cannot silently
  * drift from the contract.
  */
+/**
+ * Where the fake learns batch membership for `filter.batchId`.
+ *
+ * Batch membership lives on the ENROLMENT, not the student, so a real
+ * adapter joins to the enrolments table. The fake mirrors that by asking
+ * the enrolment fake. Typed as a narrow slice of the PORT, not the fake
+ * class, so this test-only wiring adds no production coupling.
+ */
+export type BatchMembershipSource = Pick<EnrollmentRepository, "findMany">;
+
+/** Compares two sort keys case-insensitively (approximates SQL Server CI collation). */
+const compareText = (a: string, b: string): number =>
+  a.toLowerCase().localeCompare(b.toLowerCase());
+
+/**
+ * Final tiebreaker: `id ASC`, compared NUMERICALLY within the string so the
+ * fake's sequential ids order like a BIGINT key ("student-2" before
+ * "student-10"), not lexically.
+ */
+const compareIds = (a: string, b: string): number =>
+  a.localeCompare(b, undefined, { numeric: true });
+
+const compareStudents = (a: Student, b: Student, sort: StudentSort): number => {
+  const primary = compareText(a[sort.field], b[sort.field]);
+  const directed = sort.order === "desc" ? -primary : primary;
+
+  // id ASC regardless of direction (approved; database-handoff Q-I1).
+  return directed !== 0 ? directed : compareIds(a.id, b.id);
+};
+
 export class InMemoryStudentRepository implements StudentRepository {
   private readonly store = new InMemoryStore<Student>("student");
+
+  /**
+   * `enrollments` is optional so existing standalone constructions keep
+   * working. `createTestHarness()` always connects it. Without it, a
+   * `batchId` filter THROWS rather than being silently ignored.
+   */
+  constructor(private readonly enrollments?: BatchMembershipSource) {}
 
   // --- test helpers ------------------------------------------------------
 
@@ -64,8 +104,14 @@ export class InMemoryStudentRepository implements StudentRepository {
   async findMany(
     filter: StudentFilter,
     pagination: PaginationQuery,
+    sort: StudentSort = DEFAULT_STUDENT_SORT,
   ): Promise<PaginatedResult<Student>> {
+    const inBatch =
+      filter.batchId === undefined ? undefined : await this.studentIdsInBatch(filter.batchId);
+
     const rows = this.store.filter((student) => {
+      if (inBatch !== undefined && !inBatch.has(student.id)) return false;
+
       if (filter.status !== undefined && student.status !== filter.status) return false;
 
       if (
@@ -97,13 +143,33 @@ export class InMemoryStudentRepository implements StudentRepository {
         if (!matches) return false;
       }
 
-      // filter.batchId is not resolvable from the Student shape alone -
-      // batch membership lives on the enrolment. A real adapter joins;
-      // the fake deliberately ignores it rather than pretending.
       return true;
     });
 
+    rows.sort((a, b) => compareStudents(a, b, sort));
+
     return paginate(rows, pagination);
+  }
+
+  /**
+   * Student ids with ANY enrolment in the batch - mirroring a plain join.
+   * Which enrolment statuses should count is not specified anywhere yet;
+   * flagged for the adapter in the Task 3.1 report.
+   */
+  private async studentIdsInBatch(batchId: EntityId): Promise<Set<EntityId>> {
+    if (this.enrollments === undefined) {
+      throw new Error(
+        "InMemoryStudentRepository: filter.batchId needs an enrolment source. " +
+          "Use createTestHarness(), or pass the enrolment fake to the constructor.",
+      );
+    }
+
+    const result = await this.enrollments.findMany(
+      { batchId },
+      { page: 1, pageSize: Number.MAX_SAFE_INTEGER },
+    );
+
+    return new Set(result.items.map((enrollment) => enrollment.studentId));
   }
 
   // --- writes ------------------------------------------------------------
