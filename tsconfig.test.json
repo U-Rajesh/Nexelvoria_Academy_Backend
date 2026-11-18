@@ -5,7 +5,13 @@
   // `npm run typecheck` never looked at tests/ - test files could contain
   // type errors and still pass. This config is noEmit and never builds:
   // `npm run build` still uses tsconfig.json and emits src/ alone, so test
-  // code and in-memory fakes can never reach dist/.
+  // code, in-memory fakes and the development-only `dev/` harness can
+  // never reach dist/.
+  //
+  // `dev/` is included for the same reason tests/ is: without it,
+  // `npm run typecheck` would never look at the development-only Student
+  // Registration harness, and a type error there would surface only at
+  // runtime. Safe precisely because this config emits nothing.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
@@ -14,5 +20,5 @@
     "rootDir": ".",
     "outDir": null
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "dev/**/*.ts"]
 }
