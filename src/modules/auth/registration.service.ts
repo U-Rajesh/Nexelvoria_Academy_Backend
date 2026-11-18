@@ -6,8 +6,10 @@ import {
   DuplicateRecordError,
   RepositoryError,
 } from "../../repositories/repository.errors";
+import type { StudentRepository } from "../students/student.repository";
+import type { StudentProfileInput } from "../students/student.types";
 import type { UserRepository } from "../users/user.repository";
-import { registrationSchema } from "./auth.validation";
+import { type RegistrationInput, registrationSchema } from "./auth.validation";
 import type { CredentialRepository } from "./credential.repository";
 import { hashPassword } from "./password.service";
 
@@ -29,37 +31,60 @@ import { hashPassword } from "./password.service";
  * and `login` already refuses a `pending` account. Registration is therefore
  * INCOMPLETE as a user journey until the OTP step exists.
  *
- * It does NOT persist the admissions profile (college, degree, passing year,
- * address, guardian contact). The input is fully validated so nothing
- * invalid is accepted, but the fields are not written anywhere, because the
- * user-to-student creation linkage is unresolved - see
- * docs/auth-implementation-plan.md §21.2. Writing them through
- * `StudentRepository.create` today would produce a SECOND record with its
- * own unrelated id, invisible to `UserRepository.findByEmail` and therefore
- * to login. An unlinked orphan is worse than a documented gap, so the write
- * is withheld rather than guessed at.
+ * It DOES persist the admissions profile as of Step 6K-2 (college, degree,
+ * passing year, address, guardian contact and the optional profile links),
+ * through `StudentRepository.createForUser`. That became possible once
+ * open-questions **Q25** was settled as Option A - a one-to-one SHARED
+ * PRIMARY KEY, so `Student.id === User.id`.
+ *
+ * Before Q25 was answered this write was deliberately withheld: the only
+ * contract available was `StudentRepository.create`, which mints its own
+ * id, so the row would have been an orphan invisible to
+ * `UserRepository.findByEmail` and therefore to login. `createForUser`
+ * exists precisely to make that impossible - it keys the profile by the
+ * user's own id and reads the identity from the user record rather than
+ * duplicating it.
  * ===========================================================================
  *
  * ===========================================================================
- * NO ATOMIC USER + CREDENTIAL CREATION.
+ * NOT ATOMIC. THREE SEQUENTIAL WRITES, AND THIS IS NOT PRODUCTION-READY.
  *
- * Two repositories, no unit of work (Q-CR6 / Q-X1), and no transaction is
- * invented here. The order is chosen to fail SAFE rather than to pretend:
+ * Three repositories, no unit of work (Q-CR6 / Q-X1), and no transaction is
+ * invented here. Nothing below pretends that sequential repository calls are
+ * transactional, because they are not.
  *
- *   1. create the user      - takes the email and mobile, atomically
- *   2. create the credential
+ * The ORDER is chosen so that the one failure we cannot avoid is the
+ * RECOVERABLE one:
  *
- * If step 2 fails, the user exists with no credential and **cannot log in**:
- * `login` treats a missing credential exactly like a wrong password, so the
- * failure mode is closed, not open.
+ *   1. create the user       - takes the email and mobile, atomically
+ *   2. create the credential  - failure here is UNRECOVERABLE
+ *   3. create the profile     - failure here is RECOVERABLE
  *
- * The cost is real and must not be glossed over: the email and mobile are
- * now taken, so the person cannot simply register again. Cleaning that up is
- * impossible with today's contracts - `UserRepository` has no delete, by
- * deliberate design (status changes are used instead) - so the service
- * reports `incomplete` and an operator must intervene. The smallest fixes
- * are a unit of work, or a narrow repository operation to discard an
- * unverified user; neither is added unasked. See §21.3.
+ * Why that order, specifically:
+ *
+ *   - If step 2 fails, the user exists with no credential and **cannot log
+ *     in**: `login` treats a missing credential exactly like a wrong
+ *     password, so the failure mode is closed, not open. But the email and
+ *     mobile are now taken and the person cannot simply register again.
+ *     `UserRepository` has no delete, by deliberate design (status changes
+ *     are used instead), so the service reports `incomplete` and an operator
+ *     must intervene. See §21.3.
+ *
+ *   - If step 3 fails, the account itself is sound - it can still be
+ *     verified and activated - but it carries no admissions data. That is
+ *     recoverable: `createForUser` can safely be re-attempted (it throws
+ *     `DuplicateRecordError` if the profile already exists), or an admin can
+ *     supply the data. The service reports `profile_incomplete`.
+ *
+ * Putting the recoverable failure LAST is the only atomicity-adjacent
+ * guarantee available without a transaction. It is deliberate, not
+ * incidental.
+ *
+ * NO COMPENSATING DELETES. A failed step is never "undone" by deleting
+ * what came before: `UserRepository` exposes no delete by design, and a
+ * compensation that itself fails leaves worse state than no compensation at
+ * all. What the service does instead is report precisely which partial state
+ * exists, and log it loudly enough for an operator to act.
  * ===========================================================================
  */
 
@@ -74,9 +99,18 @@ export type RegistrationFailureReason =
   /**
    * The user was created but the credential was not, so the account cannot
    * be used and the identifiers are now held by an unusable record.
-   * Requires operator intervention.
+   * Requires operator intervention. UNRECOVERABLE with today's contracts.
    */
   | "incomplete"
+  /**
+   * The user AND credential were created, but the student profile was not.
+   *
+   * Deliberately distinct from `incomplete`, because the operator response
+   * is different: the account here is sound and can still be verified and
+   * activated - it simply has no admissions data. Re-attempting
+   * `createForUser` for that user id is safe, so this is RECOVERABLE.
+   */
+  | "profile_incomplete"
   /** A repository failed before anything was created. */
   | "registration_unavailable";
 
@@ -109,11 +143,73 @@ export type RegistrationResult =
 export interface RegistrationServiceDeps {
   users: UserRepository;
   credentials: CredentialRepository;
+  /**
+   * Student profiles, keyed by the USER's id.
+   *
+   * Only `createForUser` is used from this port - never `create`, which
+   * mints its own id and would produce a record unreachable from the
+   * identity login resolves.
+   */
+  students: StudentRepository;
 }
 
 export interface RegistrationService {
   register(input: unknown): Promise<RegistrationResult>;
 }
+
+/**
+ * The ONLY path from validated registration input to a student profile.
+ *
+ * An explicit WHITELIST, built field by field rather than spread. A field
+ * added to `registrationSchema` later is DROPPED here until someone
+ * deliberately adds it, which is what stops an unreviewed input field
+ * reaching storage.
+ *
+ * Identity (`name`, `email`, `mobile`, `status`) is absent on purpose: it
+ * belongs to the user record, and `createForUser` reads it from there.
+ *
+ * EMPTY STRINGS ARE OMITTED, not stored. The schema accepts `""` for the
+ * optional URLs, because the frontend submits an untouched input that way.
+ * Persisting `""` would put `linkedInUrl: ""` into every API response for
+ * every student who skipped the field; absent is the honest representation
+ * and matches the "omits absent optional fields" rule the student response
+ * whitelist already follows.
+ *
+ * `resumeUrl` is absent by design: registration collects no file, because
+ * file storage is unresolved (open-questions **Q11**). `accountState` is
+ * absent for the reason given on `StudentProfileInput` - the mapping from
+ * status and approval is not a confirmed business rule, so no value is
+ * invented.
+ */
+const toStudentProfile = (data: RegistrationInput): StudentProfileInput => {
+  /** Treats an absent value and a blank string identically. */
+  const present = (value: string | undefined): string | undefined =>
+    value === undefined || value.trim() === "" ? undefined : value.trim();
+
+  const guardianContact = present(data.guardianContact);
+  const linkedInUrl = present(data.linkedInUrl);
+  const githubUrl = present(data.githubUrl);
+  const resumeFileName = present(data.resumeFileName);
+  const resumeFileSize = present(data.resumeFileSize);
+
+  return {
+    // --- required admissions data, all validated by the schema ---
+    collegeName: data.collegeName,
+    degreeBranch: data.degreeBranch,
+    passingYear: data.passingYear,
+    courseInterestedIn: data.courseInterestedIn,
+    dateOfBirth: data.dateOfBirth,
+    gender: data.gender,
+    fullAddress: data.fullAddress,
+
+    // --- optional: included only when actually supplied ---
+    ...(guardianContact === undefined ? {} : { guardianContact }),
+    ...(linkedInUrl === undefined ? {} : { linkedInUrl }),
+    ...(githubUrl === undefined ? {} : { githubUrl }),
+    ...(resumeFileName === undefined ? {} : { resumeFileName }),
+    ...(resumeFileSize === undefined ? {} : { resumeFileSize }),
+  };
+};
 
 export const createRegistrationService = (
   deps: RegistrationServiceDeps,
@@ -194,6 +290,30 @@ export const createRegistrationService = (
         ]);
       }
 
+      // =====================================================================
+      // TRANSACTION BOUNDARY - NOT YET TRANSACTIONAL.
+      //
+      // Stages 4, 5 and 6 below MUST become ONE atomic unit before this
+      // service is exposed over HTTP. Two candidate implementations:
+      //
+      //   (a) `dbo.USP_NXA_Register_Student` - if that stored procedure
+      //       inserts the user, the credential and the student inside one
+      //       transaction, this entire region collapses into a SINGLE
+      //       repository call and the ordering notes above become moot. Its
+      //       signature is not yet available to the backend.
+      //   (b) A unit-of-work port (open-questions **Q-X1**) wrapping the
+      //       three writes in one mssql transaction.
+      //
+      // Until one of those exists, a failure at stage 5 or 6 leaves partial
+      // state that an operator must resolve. DO NOT MOUNT AN HTTP ROUTE FOR
+      // REGISTRATION UNTIL THIS IS CLOSED.
+      //
+      // Today three independent guards keep this flow unreachable in
+      // production: `/auth` is not mounted in src/routes/index.ts,
+      // `createProductionContainer()` registers no repositories, and no SQL
+      // adapters exist.
+      // =====================================================================
+
       // --- 4. create the user (authoritative uniqueness guard) -----------
       let userId: EntityId;
 
@@ -249,6 +369,54 @@ export const createRegistrationService = (
         );
 
         return fail("incomplete");
+      }
+
+      // --- 6. create the student profile ---------------------------------
+      // LAST, deliberately - see the ordering note in the file header. The
+      // profile is keyed by `userId`, so `Student.id === User.id` holds by
+      // construction rather than by convention.
+      try {
+        await deps.students.createForUser(userId, toStudentProfile(parsed.data));
+      } catch (err) {
+        // The write may have landed despite the error - a timeout that
+        // actually committed is indistinguishable from one that did not.
+        // So CONFIRM by reading before reporting anything. This is a read
+        // after an unconditional write, used only to establish what
+        // happened; it gates nothing, and it is NOT a compensating delete.
+        let persisted = false;
+
+        try {
+          persisted = (await deps.students.findById(userId)) !== null;
+        } catch {
+          // The outcome cannot be established. Fail closed and report the
+          // partial state rather than claiming a success we cannot verify.
+        }
+
+        if (!persisted) {
+          logger.error(
+            "REGISTRATION PROFILE INCOMPLETE: a user and a credential were created but the " +
+              "student profile was NOT. The account is sound and can still be verified and " +
+              "activated, but it carries no admissions data. There is no transaction - an " +
+              "operator or a later profile-completion step must supply it. Re-attempting " +
+              "createForUser for this user id is safe.",
+            {
+              userId,
+              errorType: describeError(err),
+              isRepositoryError: err instanceof RepositoryError,
+            },
+          );
+
+          return fail("profile_incomplete");
+        }
+
+        // The profile IS there, so the registration did complete. Reported
+        // at warn because an erroring write that commits is worth knowing
+        // about even when the outcome is correct.
+        logger.warn(
+          "the student profile write reported an error but the profile was persisted; " +
+            "treating the registration as successful",
+          { userId, errorType: describeError(err) },
+        );
       }
 
       logger.info("registration succeeded", { userId });

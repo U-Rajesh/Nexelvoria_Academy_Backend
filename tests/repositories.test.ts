@@ -2,13 +2,22 @@ import { beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import type { PaginationQuery } from "../src/contracts/api.contract";
-import type { CreateStudentInput } from "../src/modules/students/student.types";
+import type {
+  CreateStudentInput,
+  StudentProfileInput,
+} from "../src/modules/students/student.types";
+import type { CreateUserInput } from "../src/modules/users/user.types";
 import type { CreateCourseInput } from "../src/modules/courses/course.types";
 import {
   DuplicateRecordError,
   RecordNotFoundError,
+  RepositoryError,
 } from "../src/repositories/repository.errors";
-import { createTestHarness, type TestHarness } from "./fakes";
+import {
+  InMemoryStudentRepository,
+  createTestHarness,
+  type TestHarness,
+} from "./fakes";
 
 const PAGE: PaginationQuery = { page: 1, pageSize: 10 };
 
@@ -17,6 +26,22 @@ const studentInput = (overrides: Partial<CreateStudentInput> = {}): CreateStuden
   email: "ananya@test.local",
   mobile: "9000000001",
   status: "pending",
+  collegeName: "Nexelvoria Institute",
+  degreeBranch: "CSE",
+  passingYear: "2026",
+  courseInterestedIn: "Java Full Stack",
+  dateOfBirth: "2004-05-10",
+  gender: "female",
+  fullAddress: "Hyderabad",
+  ...overrides,
+});
+
+/**
+ * The ADMISSIONS half only - no identity. `createForUser` reads the name,
+ * email, mobile and status from the user row instead, which is the whole
+ * point of the type.
+ */
+const studentProfile = (overrides: Partial<StudentProfileInput> = {}): StudentProfileInput => ({
   collegeName: "Nexelvoria Institute",
   degreeBranch: "CSE",
   passingYear: "2026",
@@ -659,6 +684,247 @@ describe("repository ports (verified through the in-memory adapters)", () => {
 
       assert.equal(suspended.status, "suspended");
       assert.equal(suspended.name, "S");
+    });
+  });
+
+  /**
+   * Step 6K-1 - the registration path.
+   *
+   * `createForUser` creates the PROFILE half of a student for a user that
+   * already exists, under that user's OWN id. The shared key is what links
+   * the identity login resolves to the admissions data, so it is the first
+   * thing asserted here.
+   */
+  describe("students - createForUser (Step 6K-1)", () => {
+    const newUser = (overrides: Partial<CreateUserInput> = {}) =>
+      h.users.create({
+        name: "Ananya Rao",
+        email: "ananya@test.local",
+        mobile: "9000000001",
+        role: "student",
+        status: "pending",
+        ...overrides,
+      });
+
+    it("uses the user's id as the student id - the shared-key invariant", async () => {
+      const user = await newUser();
+      const student = await h.students.createForUser(user.id, studentProfile());
+
+      assert.equal(student.id, user.id, "Student.id must equal User.id");
+      assert.equal(student.id, "user-1");
+    });
+
+    it("does NOT generate a second id", async () => {
+      const user = await newUser();
+      await h.students.createForUser(user.id, studentProfile());
+
+      // The student store's own sequence was never advanced, so nothing is
+      // keyed "student-1" and the only row answers to the user's id.
+      assert.equal(await h.students.findById("student-1"), null);
+      assert.ok(await h.students.findById(user.id));
+      assert.equal(h.students.count, 1);
+
+      // Proof the sequence is untouched: a later `create` still gets -1.
+      const standalone = await h.students.create(
+        studentInput({ email: "other@test.local", mobile: "9000000002" }),
+      );
+      assert.equal(standalone.id, "student-1");
+    });
+
+    it("copies identity from the user row, not from the profile input", async () => {
+      const user = await newUser({
+        name: "Priya Nair",
+        email: "priya@test.local",
+        mobile: "9123456780",
+        status: "active",
+      });
+
+      const student = await h.students.createForUser(user.id, studentProfile());
+
+      assert.equal(student.name, "Priya Nair");
+      assert.equal(student.email, "priya@test.local");
+      assert.equal(student.mobile, "9123456780");
+      assert.equal(student.status, "active");
+      assert.equal(student.createdAt, user.createdAt);
+    });
+
+    it("applies the server-owned defaults, exactly as create() does", async () => {
+      const user = await newUser();
+      const student = await h.students.createForUser(user.id, studentProfile());
+
+      assert.equal(student.role, "student");
+      assert.equal(student.isEmailVerified, false, "BR-001 starts unverified");
+      assert.equal(student.isMobileVerified, false, "BR-001 starts unverified");
+      assert.equal(student.adminApprovalStatus, "pending", "BR-002 starts pending");
+      assert.deepEqual(student.enrolledCourseIds, []);
+    });
+
+    it("leaves accountState unset rather than inventing one", async () => {
+      const user = await newUser();
+      const student = await h.students.createForUser(user.id, studentProfile());
+
+      // The status / adminApprovalStatus -> accountState mapping is not a
+      // confirmed business rule, so no value is fabricated here. The field
+      // is optional on `Student`, so absent is valid.
+      assert.equal("accountState" in student, false);
+      assert.equal(student.accountState, undefined);
+    });
+
+    it("persists every admissions field supplied", async () => {
+      const user = await newUser();
+      const profile = studentProfile({
+        collegeName: "IIT Hyderabad",
+        degreeBranch: "ECE",
+        passingYear: "2025",
+        courseInterestedIn: "Data Science",
+        dateOfBirth: "2003-01-02",
+        gender: "male",
+        fullAddress: "12 Road, Hyderabad 500001",
+        guardianContact: "9876543210",
+        linkedInUrl: "https://linkedin.com/in/example",
+        githubUrl: "https://github.com/example",
+      });
+
+      const student = await h.students.createForUser(user.id, profile);
+      const stored = student as unknown as Record<string, unknown>;
+
+      for (const [field, value] of Object.entries(profile)) {
+        assert.equal(stored[field], value, `${field} must be persisted`);
+      }
+    });
+
+    it("omits optional fields that were not supplied", async () => {
+      const user = await newUser();
+      const student = await h.students.createForUser(user.id, studentProfile());
+
+      // Absent, not present-and-undefined - the discipline
+      // `exactOptionalPropertyTypes` exists to enforce.
+      for (const field of [
+        "guardianContact",
+        "resumeUrl",
+        "resumeFileName",
+        "resumeFileSize",
+        "linkedInUrl",
+        "githubUrl",
+        "avatarUrl",
+      ]) {
+        assert.equal(field in student, false, `${field} must be absent`);
+      }
+    });
+
+    it("throws RecordNotFoundError when the user does not exist", async () => {
+      await assert.rejects(
+        () => h.students.createForUser("user-404", studentProfile()),
+        (err: unknown) => {
+          assert.ok(err instanceof RecordNotFoundError);
+          assert.equal(err.entity, "user");
+          assert.equal(err.id, "user-404");
+          return true;
+        },
+      );
+
+      assert.equal(h.students.count, 0, "nothing was written");
+    });
+
+    it("throws DuplicateRecordError on a second profile for the same user", async () => {
+      const user = await newUser();
+      await h.students.createForUser(user.id, studentProfile());
+
+      await assert.rejects(
+        () => h.students.createForUser(user.id, studentProfile({ collegeName: "Other" })),
+        (err: unknown) => {
+          assert.ok(err instanceof DuplicateRecordError);
+          assert.equal(err.entity, "student");
+          assert.equal(err.field, "userId");
+          return true;
+        },
+      );
+
+      // The first profile is intact - the refused write changed nothing.
+      assert.equal(h.students.count, 1);
+      assert.equal((await h.students.findById(user.id))?.collegeName, "Nexelvoria Institute");
+    });
+
+    it("does NOT silently convert a non-student user into a student", async () => {
+      const roles = ["teacher", "admin", "super_admin", "public"] as const;
+
+      for (const [index, role] of roles.entries()) {
+        const user = await newUser({
+          role,
+          email: `${role}@test.local`,
+          mobile: `900000010${index}`,
+        });
+
+        await assert.rejects(
+          () => h.students.createForUser(user.id, studentProfile()),
+          (err: unknown) => {
+            assert.ok(err instanceof Error);
+            // A programming error, NOT a RepositoryError: those subtypes
+            // carry an agreed HTTP mapping (404 / 409) and this is neither.
+            assert.equal(
+              err instanceof RepositoryError,
+              false,
+              "a role mismatch is not a repository condition",
+            );
+            assert.match(err.message, /not "student"/);
+            return true;
+          },
+        );
+
+        assert.equal(
+          await h.students.findById(user.id),
+          null,
+          `no profile may be written for a ${role} user`,
+        );
+      }
+
+      assert.equal(h.students.count, 0);
+    });
+
+    it("does not re-check the email the user row already holds", async () => {
+      // The user owns the email and mobile uniqueness. Re-checking it here
+      // would throw a duplicate on the identifiers registration has just
+      // reserved for this very person.
+      const user = await newUser();
+      const student = await h.students.createForUser(user.id, studentProfile());
+
+      assert.equal(student.email, user.email);
+      assert.equal(student.mobile, user.mobile);
+    });
+
+    it("is visible to findById, findByEmail and findMany", async () => {
+      const user = await newUser();
+      await h.students.createForUser(user.id, studentProfile());
+
+      assert.equal((await h.students.findById(user.id))?.id, user.id);
+      assert.equal((await h.students.findByEmail("ANANYA@TEST.LOCAL"))?.id, user.id);
+
+      const page = await h.students.findMany({}, PAGE);
+      assert.equal(page.total, 1);
+      assert.equal(page.items[0]?.id, user.id);
+    });
+
+    it("fails loudly when no user source is wired", async () => {
+      const standalone = new InMemoryStudentRepository();
+
+      await assert.rejects(
+        () => standalone.createForUser("user-1", studentProfile()),
+        /needs a user source/,
+      );
+    });
+
+    it("leaves create() behaviour unchanged", async () => {
+      const student = await h.students.create(studentInput());
+
+      assert.equal(student.id, "student-1", "create still mints its own id");
+      assert.equal(student.role, "student");
+      assert.equal(student.adminApprovalStatus, "pending");
+
+      // create() still owns its uniqueness checks.
+      await assert.rejects(
+        () => h.students.create(studentInput({ mobile: "9000000003" })),
+        DuplicateRecordError,
+      );
     });
   });
 });

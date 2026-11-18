@@ -161,7 +161,10 @@ These are the modelling decisions we flag rather than decide:
 1. **`Student.enrolledCourseIds` is an array on the student**, but the same
    information exists in the enrolment relationship. Should the API derive it
    from enrolments (one source of truth) or is it stored separately? We
-   recommend deriving it. **Question Q-R1.**
+   recommend deriving it. **Question Q-R1.** This also governs the
+   `GET /students?courseId=` filter (`StudentFilter.courseId`), which today
+   resolves against `enrolledCourseIds`; its long-term stored-versus-derived
+   behaviour remains unresolved until Q-R1 is decided.
 2. **`Teacher.assignedCourseIds` / `assignedBatchIds` are two parallel arrays**,
    but an allocation is really a `(teacher, course, batch)` triple — which two
    separate arrays cannot express. We modelled the triple as
@@ -326,12 +329,81 @@ the **lookups the application performs**, for you to index as you see fit.
 - `mobile` lookup (login accepts either)
 - Students filtered by `status`, `adminApprovalStatus`, `passingYear`
 - Student free-text search over `name`, `email`, `mobile`, `collegeName`
+- Students filtered by `batchId` — **via a join to enrolments** (see below)
+- Students sorted by `name`, `createdAt`, `passingYear` (see below)
+
+**Student sorting and batch filter — `StudentRepository.findMany(filter, pagination, sort?)`**
+*(added at backend Step 3, Task 3.1, approved by the backend lead)*
+
+```ts
+interface StudentSort {
+  field: "name" | "createdAt" | "passingYear"; // STUDENT_SORT_FIELDS
+  order: "asc" | "desc";
+}
+```
+
+- **`field` is already validated** by the service against `STUDENT_SORT_FIELDS`
+  (`src/modules/students/student.types.ts`). Still map each field to its column
+  with a fixed lookup — never interpolate it into SQL.
+- **Default when `sort` is omitted: `ORDER BY createdAt DESC, id ASC`** —
+  newest registrations first. This default is approved and the backend relies
+  on it; please implement exactly this rather than an adapter-chosen order.
+- **Always append `id ASC` as the final tiebreaker, regardless of direction**
+  (Q-I1), e.g. `ORDER BY name DESC, id ASC`.
+- **`name` should sort case-insensitively.** The in-memory test fake compares
+  lowercased values with `localeCompare`, which only *approximates* SQL Server's
+  CI collation (Q17) — it is not an exact emulation; accent and locale ordering
+  can differ. `createdAt` (ISO-8601 UTC) and `passingYear` (4-digit string)
+  order correctly as text.
+- **`filter.batchId` means "has an enrolment in that batch".** Batch membership
+  lives on the enrolment, not the student, so this needs a join (or `EXISTS`)
+  to enrolments on `(batchId, studentId)`. **Open:** should every enrolment
+  status count (e.g. `cancelled`), or only some? Nothing specifies this yet; the
+  fake currently counts any enrolment row.
 
 **Courses**
 - `slug` lookup — every public course page view
 - Filter by `isPublished` (the public catalogue always filters on it)
 - Filter by `category`, `level`, `status`
 - Search over `title`, `shortDescription`, `technologies`
+- Sort by `title`, `feeINR`, `durationWeeks`, `totalHours` (see below)
+
+**Course sorting — `CourseRepository.findMany(filter, pagination, sort?)`**
+*(added at backend Step 1b, approved by the backend lead)*
+
+The third argument is **optional**, so callers that omit it are unaffected:
+
+```ts
+interface CourseSort {
+  field: "title" | "feeINR" | "durationWeeks" | "totalHours"; // COURSE_SORT_FIELDS
+  order: "asc" | "desc";
+}
+```
+
+What the adapter can rely on, and what it must do:
+
+- **`field` is already validated.** The service checks the client's `sortBy`
+  against `COURSE_SORT_FIELDS` (`src/modules/courses/course.types.ts`) before
+  calling the repository; anything else arrives as `sort === undefined`. Even
+  so, **map each field to its column with a fixed lookup** — never interpolate
+  the value into SQL.
+- **Always append `id ASC` as the final tiebreaker, regardless of the sort
+  direction**, e.g. `ORDER BY feeINR DESC, id ASC`. Courses often share a fee
+  or duration, and without a unique last key `OFFSET/FETCH` can repeat or skip
+  rows between pages (Q-I1). Ascending `id` on ties is also exactly what the
+  in-memory test fake does, so tests and production agree.
+- **When `sort` is omitted**, apply a deterministic default of your choosing,
+  still ending in `id ASC`. The backend does not depend on what that default is.
+- **`title` should sort case-insensitively.** The in-memory test fake compares
+  lowercased titles with `localeCompare`, which only *approximates* SQL
+  Server's default CI collation (Q17) — it is not an exact emulation (accent
+  and locale ordering can differ). If you choose a case-sensitive collation
+  for `title`, tell us so the fake can be adjusted.
+- `feeINR` is the list price. Sorting by the discounted price is not
+  supported.
+- Index suggestion only, your call: composite indexes such as
+  `(isPublished, <sortColumn>, id)` cover the public catalogue, which always
+  filters on `isPublished`.
 
 **Enrollments**
 - `(studentId, courseId)` — the uniqueness check *and* the access-control

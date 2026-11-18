@@ -117,6 +117,9 @@ describe("dependency injection container", () => {
         create: async () => {
           throw new Error("not needed for this test");
         },
+        createForUser: async () => {
+          throw new Error("not needed for this test");
+        },
         update: async () => {
           throw new Error("not needed for this test");
         },
