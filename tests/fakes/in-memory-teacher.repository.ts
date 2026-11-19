@@ -2,12 +2,14 @@ import type { PaginatedResult, PaginationQuery } from "../../src/contracts/api.c
 import type { EntityId } from "../../src/contracts/identifier.contract";
 import type { UserStatus } from "../../src/contracts/user.contract";
 import type { TeacherRepository } from "../../src/modules/teachers/teacher.repository";
-import type {
-  CreateTeacherInput,
-  Teacher,
-  TeacherAllocation,
-  TeacherFilter,
-  UpdateTeacherInput,
+import {
+  DEFAULT_TEACHER_SORT,
+  type CreateTeacherInput,
+  type Teacher,
+  type TeacherAllocation,
+  type TeacherFilter,
+  type TeacherSort,
+  type UpdateTeacherInput,
 } from "../../src/modules/teachers/teacher.types";
 import { DuplicateRecordError } from "../../src/repositories/repository.errors";
 import {
@@ -16,6 +18,26 @@ import {
   equalsIgnoreCase,
   paginate,
 } from "./in-memory-store";
+
+/**
+ * Orders two teachers by an allow-listed field, then `id ASC`.
+ *
+ * `name` compares case-insensitively (approximating SQL Server CI collation,
+ * not emulating it exactly); `createdAt` is ISO-8601 UTC text, which orders
+ * correctly as text; `experienceYears` compares numerically. The id
+ * tiebreaker is numeric-aware so sequential ids order like a BIGINT key
+ * ("teacher-2" before "teacher-10") and is ASC regardless of direction.
+ */
+const compareTeachers = (a: Teacher, b: Teacher, sort: TeacherSort): number => {
+  const primary =
+    sort.field === "experienceYears"
+      ? a.experienceYears - b.experienceYears
+      : a[sort.field].toLowerCase().localeCompare(b[sort.field].toLowerCase());
+
+  const directed = sort.order === "desc" ? -primary : primary;
+
+  return directed !== 0 ? directed : a.id.localeCompare(b.id, undefined, { numeric: true });
+};
 
 /** TEST-ONLY in-memory `TeacherRepository`. See in-memory-store.ts. */
 export class InMemoryTeacherRepository implements TeacherRepository {
@@ -56,6 +78,7 @@ export class InMemoryTeacherRepository implements TeacherRepository {
   async findMany(
     filter: TeacherFilter,
     pagination: PaginationQuery,
+    sort: TeacherSort = DEFAULT_TEACHER_SORT,
   ): Promise<PaginatedResult<Teacher>> {
     const rows = this.store.filter((teacher) => {
       if (filter.status !== undefined && teacher.status !== filter.status) return false;
@@ -90,6 +113,8 @@ export class InMemoryTeacherRepository implements TeacherRepository {
 
       return true;
     });
+
+    rows.sort((a, b) => compareTeachers(a, b, sort));
 
     return paginate(rows, pagination);
   }
