@@ -22,10 +22,11 @@ import {
 /**
  * Orders two courses by an allow-listed field.
  *
- * Strings compare case-insensitively, mirroring SQL Server's default
- * CI collation (open-questions Q17). `Array.prototype.sort` is stable, so
- * ties keep insertion order - the fake's equivalent of the id tiebreaker a
- * real adapter must append (database-handoff Q-I1).
+ * Strings compare case-insensitively, approximating SQL Server's default
+ * CI collation (open-questions Q17). Ties are broken EXPLICITLY by `id ASC`,
+ * numeric-aware and regardless of direction (database-handoff Q-I1) - not
+ * by insertion order, which matches id order only when rows happen to be
+ * inserted in id order.
  */
 const compareCourses = (a: Course, b: Course, sort: CourseSort): number => {
   const left = a[sort.field];
@@ -36,7 +37,9 @@ const compareCourses = (a: Course, b: Course, sort: CourseSort): number => {
       ? left.toLowerCase().localeCompare(right.toLowerCase())
       : Number(left) - Number(right);
 
-  return sort.order === "desc" ? -result : result;
+  const directed = sort.order === "desc" ? -result : result;
+
+  return directed !== 0 ? directed : a.id.localeCompare(b.id, undefined, { numeric: true });
 };
 
 /** TEST-ONLY in-memory `CourseRepository`. See in-memory-store.ts. */
