@@ -1,4 +1,5 @@
 import type { CredentialRepository } from "../modules/auth/credential.repository";
+import type { OtpChallengeRepository } from "../modules/auth/otp.repository";
 import type { SessionRepository } from "../modules/auth/session.repository";
 import type { CourseRepository } from "../modules/courses/course.repository";
 import type { EnrollmentRepository } from "../modules/enrollments/enrollment.repository";
@@ -49,6 +50,11 @@ export interface RepositoryRegistry {
   credentials: CredentialRepository;
   /** Server-side sessions: the seam that makes revocation possible. */
   sessions: SessionRepository;
+  /**
+   * One-time passcode challenges. Email verification today; the purpose is
+   * stored as data so another channel is an additive change (Q3, BR-014).
+   */
+  otpChallenges: OtpChallengeRepository;
   users: UserRepository;
   students: StudentRepository;
   teachers: TeacherRepository;
@@ -149,6 +155,9 @@ export const createContainer = (factories: RepositoryFactories = {}): AppContain
     },
     get sessions() {
       return resolve("sessions");
+    },
+    get otpChallenges() {
+      return resolve("otpChallenges");
     },
     get users() {
       return resolve("users");

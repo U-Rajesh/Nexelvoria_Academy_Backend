@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 
 import type { AppContainer } from "../container/container";
 import { createCourseRoutes } from "../modules/courses/course.routes";
@@ -28,6 +28,22 @@ export const createApiV1Router = (
    * where it can be reviewed.
    */
   extraRoutes?: Router,
+  /**
+   * Authentication middleware, handed to the modules whose routes need an
+   * identity.
+   *
+   * ALWAYS UNDEFINED IN PRODUCTION today - `src/server.ts` calls
+   * `createApp()` with no options. Nothing in the application wires
+   * `createAuthenticate` yet, so passing it here is how the development
+   * harness gets real admin authentication without changing what production
+   * does. Omitted, every guarded route keeps failing closed with 401.
+   *
+   * Wiring this in production is a SHARED ARCHITECTURE DECISION for the
+   * backend lead: with no session adapter registered, `authenticate`
+   * answers 503 rather than 401, which changes the response every existing
+   * guarded route gives today.
+   */
+  authenticate?: RequestHandler,
 ): Router => {
   const router = Router();
 
@@ -67,6 +83,7 @@ export const createApiV1Router = (
       get courses() {
         return container.repositories.courses;
       },
+      ...(authenticate === undefined ? {} : { authenticate }),
     }),
   );
   // router.use("/enrollments", ...);
@@ -76,6 +93,7 @@ export const createApiV1Router = (
       get students() {
         return container.repositories.students;
       },
+      ...(authenticate === undefined ? {} : { authenticate }),
     }),
   );
   // router.use("/teachers", ...);

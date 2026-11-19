@@ -3,10 +3,12 @@ import type { EntityId } from "../../contracts/identifier.contract";
 import { resolveSortField } from "../../middleware/validate.middleware";
 import { RecordNotFoundError } from "../../repositories/repository.errors";
 import { ApiError } from "../../utils/api-error";
+import { deriveAccountState } from "./account-state";
 import type { StudentRepository } from "./student.repository";
 import {
   DEFAULT_STUDENT_SORT,
   STUDENT_SORT_FIELDS,
+  type AdminApprovalStatus,
   type AdminSettableStudentStatus,
   type Student,
   type StudentFilter,
@@ -83,7 +85,33 @@ export const toStudentResponse = (student: Student): Student => ({
     ? {}
     : { adminApprovalRemarks: student.adminApprovalRemarks }),
   ...(student.approvedAt === undefined ? {} : { approvedAt: student.approvedAt }),
-  ...(student.accountState === undefined ? {} : { accountState: student.accountState }),
+  /**
+   * DERIVED, never passed through from storage.
+   *
+   * Approved by the backend lead at Phase 5 Stage 0: `accountState` is a
+   * view over `status`, `isEmailVerified` and `adminApprovalStatus`, all of
+   * which are already stored. Reading a stored copy here would make it a
+   * SECOND source of truth that can disagree with the three facts behind it
+   * - an approved student still showing `pending_approval` because a write
+   * site forgot to update it.
+   *
+   * Computing it on the way out means the response cannot be stale, and the
+   * database needs no column (database-handoff section 16.1).
+   *
+   * API behaviour is unchanged: the field is still present and still carries
+   * one of the same six values. It is simply correct by construction now.
+   * `undefined` is omitted exactly as before, which happens only when the
+   * stored facts name no `AccountState` - see `deriveAccountState`.
+   */
+  ...(() => {
+    const accountState = deriveAccountState({
+      status: student.status,
+      isEmailVerified: student.isEmailVerified,
+      adminApprovalStatus: student.adminApprovalStatus,
+    });
+
+    return accountState === undefined ? {} : { accountState };
+  })(),
 
   enrolledCourseIds: [...student.enrolledCourseIds],
 });
@@ -96,6 +124,76 @@ export const toStudentResponse = (student: Student): Student => ({
  * resolving one throws. Reading it per call keeps the app (and /health)
  * booting - the same pattern as the courses module.
  */
+/**
+ * The ONLY approval states a decision may be made from.
+ *
+ * `pending` alone. A student who has already been approved or rejected has
+ * had their decision; re-deciding is a different operation with different
+ * rules (who may overturn a rejection, and what that does to a paid
+ * enrolment), and none of those rules is confirmed. Refusing with a 409 is
+ * honest - silently overwriting the first decision would destroy the audit
+ * trail `recordApprovalDecision` exists to keep.
+ */
+const DECIDABLE_FROM: AdminApprovalStatus = "pending";
+
+/**
+ * Shared implementation behind approve and reject.
+ *
+ * Module-level and taking `deps` explicitly, because `createStudentService`
+ * returns an object literal and has no closure body to hold it.
+ *
+ * ORDER OF CHECKS, and why: the student is READ FIRST so an unknown id is a
+ * 404 and a wrong-state id is a 409. Calling `recordApprovalDecision`
+ * straight away would collapse both into whatever the adapter threw, and a
+ * 409 for a student who does not exist is actively misleading.
+ *
+ * The read-then-write is NOT atomic: two admins deciding simultaneously
+ * could both pass the state check. The window is small and the outcome is a
+ * second audited decision rather than corrupt data, so it is accepted and
+ * recorded here rather than guarded with a transaction that does not exist
+ * yet (open-questions Q-X1).
+ */
+const recordDecision = async (
+  deps: StudentServiceDeps,
+  id: EntityId,
+  status: Extract<AdminApprovalStatus, "approved" | "rejected">,
+  decidedByUserId: EntityId,
+  remarks?: string,
+): Promise<Student> => {
+  const existing = await deps.students.findById(id);
+
+  if (existing === null) {
+    throw ApiError.notFound("Student not found");
+  }
+
+  if (existing.adminApprovalStatus !== DECIDABLE_FROM) {
+    // 409, per api-contracts 5 #7 ("not in a rejectable state").
+    throw ApiError.conflict(
+      `This registration has already been ${existing.adminApprovalStatus}. ` +
+        "A decision can only be recorded once.",
+    );
+  }
+
+  try {
+    return toStudentResponse(
+      await deps.students.recordApprovalDecision(id, {
+        status,
+        decidedByUserId,
+        decidedAt: new Date().toISOString(),
+        ...(remarks === undefined || remarks === "" ? {} : { remarks }),
+      }),
+    );
+  } catch (err) {
+    // Lost the race described above, or the row vanished between the two
+    // calls.
+    if (err instanceof RecordNotFoundError) {
+      throw ApiError.notFound("Student not found");
+    }
+
+    throw err;
+  }
+};
+
 export const createStudentService = (deps: StudentServiceDeps) => ({
   /**
    * `GET /students` - admin list with filters, search, sort and paging.
@@ -166,6 +264,51 @@ export const createStudentService = (deps: StudentServiceDeps) => ({
       }
       throw err;
     }
+  },
+
+  /**
+   * `POST /students/:studentId/approve` - the BR-002 approval gate
+   * (api-contracts 5 #6).
+   *
+   * Records an audited decision through `recordApprovalDecision`, never
+   * through `update`: the port separates the two precisely because a
+   * decision carries an actor and a timestamp.
+   *
+   * `decidedByUserId` is the AUTHENTICATED ADMIN, passed in by the
+   * controller from `req.principal`. It is never read from the request body
+   * - a client that could name the deciding admin could forge an audit
+   * trail, which is the whole value of the field.
+   *
+   * WHAT THIS DOES NOT DO: it does not set `status = "active"`. BR-002 says
+   * approval gates PAYMENT, and activation follows payment, so activating
+   * here would skip a step nobody has approved. It also writes no
+   * `accountState` - that value is derived (see account-state.ts).
+   *
+   * Approval is NOT blocked on email verification. No confirmed rule
+   * requires it, so none is invented; an approved-but-unverified student
+   * still derives `pending_verification`, so the missing step stays visible
+   * rather than being papered over.
+   */
+  async approveStudent(
+    id: EntityId,
+    decidedByUserId: EntityId,
+    remarks?: string,
+  ): Promise<Student> {
+    return recordDecision(deps, id, "approved", decidedByUserId, remarks);
+  },
+
+  /**
+   * `POST /students/:studentId/reject` - api-contracts 5 #7.
+   *
+   * Remarks are mandatory and validated at the edge
+   * (`studentRejectBodySchema`), so by here they are present and non-blank.
+   */
+  async rejectStudent(
+    id: EntityId,
+    decidedByUserId: EntityId,
+    remarks: string,
+  ): Promise<Student> {
+    return recordDecision(deps, id, "rejected", decidedByUserId, remarks);
   },
 });
 

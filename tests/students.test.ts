@@ -532,9 +532,15 @@ describe("students - response whitelist (service level)", () => {
     h.students.seed(student({ id: "s1" })); // no optional fields set
     const out = await createStudentService({ students: h.students }).getStudentById("s1");
 
-    for (const key of ["avatarUrl", "guardianContact", "resumeUrl", "approvedAt", "accountState"]) {
+    for (const key of ["avatarUrl", "guardianContact", "resumeUrl", "approvedAt"]) {
       assert.equal(key in out, false, key);
     }
+
+    // `accountState` is NOT in that list any more: it is DERIVED from
+    // status + isEmailVerified + adminApprovalStatus rather than read from
+    // storage, so it is present whenever those three name a state. This
+    // student is active, verified and approved, so it derives "approved".
+    assert.equal(out.accountState, "approved");
   });
 
   it("does not hand out the repository's own array (detached copy)", async () => {
@@ -646,11 +652,18 @@ describe("students service - setStudentStatus (Task 3.2)", () => {
 
     const out = await service.setStudentStatus("s1", "suspended");
     assert.equal(out.status, "suspended");
-    assert.equal(out.accountState, "approved", "accountState must NOT be rewritten");
     assert.equal(out.adminApprovalStatus, "approved");
 
+    // The SERVICE still writes no accountState - the seeded value is
+    // untouched in storage, which is what "D1, Option A" guaranteed.
     const stored = await h.students.findById("s1");
-    assert.equal(stored?.accountState, "approved");
+    assert.equal(stored?.accountState, "approved", "storage must not be rewritten");
+
+    // But the RESPONSE now DERIVES it, so a suspension IS reflected. This
+    // resolves the integration concern recorded in api-contracts section 5:
+    // the admin badge reads accountState and previously kept showing
+    // "approved" after a suspension.
+    assert.equal(out.accountState, "suspended");
   });
 
   it("maps an unknown student to 404", async () => {
@@ -761,7 +774,11 @@ describe("students HTTP - PATCH /:studentId/status (test app, injected identity)
       assert.equal(body["success"], true);
       const data = body["data"] as Student;
       assert.equal(data.status, "deactivated");
-      assert.equal(data.accountState, "approved", "accountState untouched");
+
+      // `deactivated` is now a member of `AccountState`, so the derivation
+      // reports it instead of staying silent. The admin badge therefore
+      // shows a deactivated student correctly.
+      assert.equal(data.accountState, "deactivated");
       assert.ok(Object.keys(data).every((k) => PERMITTED_FIELDS.includes(k)));
     });
 
@@ -809,9 +826,13 @@ describe("students HTTP - PATCH /:studentId/status (test app, injected identity)
       });
       const data = (await json(res))["data"] as Student;
       assert.equal(data.status, "suspended");
-      assert.equal(data.accountState, "approved");
       assert.equal(data.isEmailVerified, true);
       assert.equal(data.adminApprovalStatus, "approved");
+
+      // The forged `accountState: "locked"` is ignored outright - the value
+      // is derived, so a client cannot set it at all. It reads "suspended"
+      // because the status change really did happen.
+      assert.equal(data.accountState, "suspended");
     });
 
     it("returns 404 for an unknown student", async () => {
