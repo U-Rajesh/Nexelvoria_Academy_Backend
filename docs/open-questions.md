@@ -44,6 +44,34 @@ specific module. **P2** should be settled before launch.
 
 ## Q3 — Dual OTP versus disabled SMS **(the central conflict)**
 
+> **RESOLVED — EMAIL ONLY (confirmed by the backend lead, 2026-11-18).**
+>
+> The contradiction below is real and was escalated rather than guessed at.
+> The decision: **BR-014 stands and BR-001 is reduced to a single channel.**
+> Email OTP is implemented; mobile OTP is **descoped**, not deferred-and-
+> forgotten, and this entry is the record of that.
+>
+> What that means concretely:
+>
+> - `Student.isMobileVerified` stays `false` for every student. Nothing
+>   verifies a mobile number, and no code pretends otherwise.
+> - `deriveAccountState()` does not read `isMobileVerified`. If it did, every
+>   student would be stuck at `pending_verification` for ever.
+> - Only `/auth/otp/email/verify` and `/auth/otp/email/resend` exist.
+>   `/auth/otp/mobile/verify`, `/auth/otp/mobile/resend` and
+>   `/auth/otp/verify-dual` are **not mounted**, and the frontend's mock
+>   implementations of them were deleted rather than left in place.
+> - `OtpPurpose` is still a closed SET with one member, and the OTP
+>   repository is keyed by it, so adding `"mobile_verification"` later is an
+>   additive change: no stored row, index or port signature has to change.
+>
+> **To reverse this**, an SMS provider must be chosen and provisioned
+> (including DLT template registration for Indian numbers), BR-014 must be
+> formally overridden, and the three routes above must be mounted. The
+> original requirement asked for mobile OTP, so reversing it is a scope
+> decision for the lead, not an implementation detail.
+
+
 Listed first because it is the one the brief singled out, and because it blocks
 the auth module entirely.
 

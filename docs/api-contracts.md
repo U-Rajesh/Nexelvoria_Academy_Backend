@@ -285,13 +285,13 @@ Owning module: `auth`. Source: `authService` (18 methods).
 
 | # | Method | Path | Purpose | Auth | Roles | Mark |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | POST | `/auth/login` | Authenticate, return token + user | No | public | [C] |
+| 1 | POST | `/auth/login` | Authenticate, return token + user — **implemented, dev only; see 4.2** | No | public | [C] |
 | 2 | POST | `/auth/register` | Student self-registration — **see 4.1** | No | public | [C] |
-| 3 | POST | `/auth/otp/email/verify` | Verify email OTP | No | public | [C] |
-| 4 | POST | `/auth/otp/mobile/verify` | Verify mobile OTP | No | public | [C] |
-| 5 | POST | `/auth/otp/verify-dual` | Verify both OTPs in one call (BR-001) | No | public | [C] |
-| 6 | POST | `/auth/otp/email/resend` | Resend email OTP (rate limited) | No | public | [C] |
-| 7 | POST | `/auth/otp/mobile/resend` | Resend mobile OTP (rate limited) | No | public | [C] |
+| 3 | POST | `/auth/otp/email/verify` | Verify email OTP — **implemented, dev only; see 4.3** | No | public | [C] |
+| 4 | POST | `/auth/otp/mobile/verify` | ~~Verify mobile OTP~~ — **DESCOPED (Q3)** | No | public | [C] |
+| 5 | POST | `/auth/otp/verify-dual` | ~~Verify both OTPs (BR-001)~~ — **DESCOPED (Q3)** | No | public | [C] |
+| 6 | POST | `/auth/otp/email/resend` | Resend email OTP — **implemented, dev only; see 4.3** | No | public | [C] |
+| 7 | POST | `/auth/otp/mobile/resend` | ~~Resend mobile OTP~~ — **DESCOPED (Q3)** | No | public | [C] |
 | 8 | POST | `/auth/password/forgot` | Start reset by email or mobile | No | public | [C] |
 | 9 | POST | `/auth/password/reset-otp/verify` | Verify reset OTP | No | public | [C] |
 | 10 | POST | `/auth/password/reset` | Set new password using reset grant | No | public | [C] |
@@ -409,6 +409,134 @@ auth-implementation-plan section 8.2. Changing it is a contract decision.
 
 ---
 
+### 4.2 Login — implementation status
+
+**Implemented at the Student Login integration, LOCAL DEVELOPMENT ONLY**,
+behind the same four guards as 4.1.
+
+```
+POST /auth/login
+  body:  { identifier: string, password: string, rememberMe?: boolean }
+  200:   { success, data: { token, expiresIn, user }, message }
+  401:   UNAUTHORIZED                   - wrong password OR unknown identifier
+  403:   ACCOUNT_PENDING                - pending, reason indeterminate
+  403:   ACCOUNT_PENDING_VERIFICATION   - + verificationTicket
+  403:   ACCOUNT_PENDING_APPROVAL       - email verified, awaiting BR-002
+  403:   ACCOUNT_LOCKED                 - consecutive failed sign-ins
+  403:   ACCOUNT_SUSPENDED / ACCOUNT_DEACTIVATED
+  422:   VALIDATION_ERROR
+  429:   TOO_MANY_REQUESTS              - 10 per IP per 15 minutes
+  503:   SERVICE_UNAVAILABLE
+```
+
+**THE 401 IS DELIBERATELY INDISTINGUISHABLE.** A wrong password and an
+unknown identifier return the same body. Account state is reported ONLY after
+a correct password, which is why those codes are safe: anyone who sees one
+already knows the password, so they already know the account exists.
+
+**Six new members of `API_ERROR_CODES`.** The closed set gained
+`ACCOUNT_PENDING`, `ACCOUNT_PENDING_VERIFICATION`,
+`ACCOUNT_PENDING_APPROVAL`, `ACCOUNT_LOCKED`, `ACCOUNT_SUSPENDED` and
+`ACCOUNT_DEACTIVATED`. The UI renders a different screen per state and must
+branch on a code, never on prose.
+
+**`ACCOUNT_PENDING` is the indeterminate case, and never a guess.** `pending`
+means either "verify your email" or "wait for an admin", and only the student
+record distinguishes them. When that record is unavailable, missing, or the
+lookup fails, the generic code is returned — reporting
+`ACCOUNT_PENDING_APPROVAL` instead would tell a student to wait for something
+that is never coming.
+
+**NO REFRESH TOKEN IS RETURNED.** `login.service.ts` forbids it until decision
+**D4** settles transport: the frontend keeps its access token in
+`localStorage`, and a long-lived refresh token in the same place is a
+materially worse exposure. `refreshToken?` is optional in the table above, so
+omitting it is compliant — but `/auth/refresh` cannot work until D4 lands, and
+a session therefore ends when the access token expires.
+
+#### Verification tickets
+
+`ACCOUNT_PENDING_VERIFICATION` carries a **`verificationTicket`** on the
+failure envelope — the only domain-specific field on it, so a student with the
+right password but an unverified email can go straight to the OTP screen.
+
+It is opaque, expires in **15 minutes**, and is separated from an access token
+three ways: a **different signing key** (HKDF from `JWT_SECRET` under its own
+label), a **different audience** (`<JWT_AUDIENCE>:email-verification`), and an
+explicit **`purpose` claim**. It also carries neither `sid` nor `role`, so
+`verifyAccessToken` refuses it twice over. **A ticket cannot authenticate
+anything**, and an access token is not accepted as a ticket.
+
+The OTP endpoints in 4.3 take `{ ticket, otp }` and `{ ticket }`. **They no
+longer accept `studentId`**, so no internal identifier travels in a body or a
+URL.
+
+#### Registration payload — TRANSITIONAL
+
+`POST /auth/register` now returns **four** fields:
+
+```
+201: { success, data: { tempStudentId, verificationTicket, email, mobile }, message }
+```
+
+`tempStudentId` is **retained for compatibility and deprecated**. It is a real
+internal identifier and must never be placed in a URL; the frontend no longer
+uses it for anything. `verificationTicket` is what a client carries forward.
+
+---
+
+### 4.3 Email verification — implementation status
+
+**Implemented at Phase 3, LOCAL DEVELOPMENT ONLY**, alongside `/auth/register`
+and behind the same four guards described in 4.1.
+
+```
+POST /auth/otp/email/verify
+  body:  { studentId: string, otp: string }   otp = exactly 6 digits
+  200:   { success, data: { studentId, isEmailVerified, accountState?,
+                            awaitingAdminApproval }, message }
+  400:   BAD_REQUEST        - wrong code (message carries attempts remaining),
+                              expired, or no outstanding code
+  404:   NOT_FOUND          - unknown studentId
+  409:   CONFLICT           - already verified
+  422:   VALIDATION_ERROR   - malformed body (does NOT spend an attempt)
+  429:   TOO_MANY_REQUESTS  - 5-attempt ceiling reached, or IP rate limit
+
+POST /auth/otp/email/resend
+  body:  { studentId: string }
+  200:   { success, data: { sentTo, expiresAt, resendAvailableAt }, message }
+         sentTo is MASKED ("a***v@example.com") - the endpoint is public and
+         never echoes a full address
+  404 / 409 as above
+  429:   TOO_MANY_REQUESTS  - 60s cooldown, or 5 sends per 15 minutes
+```
+
+**THIS IS NOT A LOGIN, AND RETURNS NO TOKEN.** The frontend mock it replaced
+returned the whole `StudentProfile` and `AuthContext` called `setUser()` with
+it, so a six-digit code was enough to become that student without a password.
+The real endpoint reports status only: a verified student must still sign in,
+and `login` applies its own gates. No profile field is returned either.
+
+**`accountState` is DERIVED, never stored** — see
+`src/modules/students/account-state.ts`. `pending_approval` after a successful
+verification; `rejected` and `suspended` outrank verification.
+
+**Registration now issues a code as a side effect.** `POST /auth/register`
+still returns **exactly** the three D2 fields — whether a code went out is
+reported in `message`, not as a fourth field. A delivery failure still returns
+**201**, because the account really was created; the message then says the
+code could not be sent and to use resend.
+
+**Mobile and dual-OTP endpoints (#4, #5, #7) are NOT mounted.** Mobile OTP is
+descoped: BR-014 disables SMS and open-questions **Q3** records the decision.
+The frontend's mock implementations were deleted rather than left in place.
+
+**Delivery is a logged passcode in development.** No mail provider is
+configured, so `createLoggingOtpDelivery()` writes the code to the backend log
+and refuses to be constructed under `NODE_ENV=production`.
+
+---
+
 ## 5. Module: `students`
 
 Owning module: `students`. Sources: `studentService`, `adminService` (student
@@ -460,12 +588,27 @@ POST /students/:studentId/reject
 - **`PATCH /students/:studentId/status` (implemented, Task 3.2).** Body
   `{ "status": "active" | "suspended" | "deactivated" }`; `pending` and any
   other value is `422`; unknown student `404`; returns `StudentProfile`.
-  **Writes `status` only — `accountState` is not changed** (approved D1,
+  **Writes `status` only — no `accountState` is stored** (approved D1,
   Option A).
-  *Integration concern:* the frontend mock also rewrites `accountState` on a
-  status change, and the admin list badge reads `accountState`, so the badge
-  will not reflect a suspension until the `status`/`accountState` business
-  rules are confirmed during frontend-backend integration.
+
+  **UPDATED at Phase 5 Stage 0 — the integration concern below is resolved.**
+  `accountState` is now **derived** from `status`, `isEmailVerified` and
+  `adminApprovalStatus` when a response is built
+  (`src/modules/students/account-state.ts`), not read from storage. Nothing
+  persists it and the database needs no column.
+
+  Consequences:
+  - The admin list badge **now reflects a suspension immediately**. Previously
+    it kept showing `approved`, because the stored value was never rewritten.
+  - A response can no longer carry a stale `accountState`.
+  - **A `deactivated` student now reports `accountState: "deactivated"`.**
+    The member was added to the `AccountState` union on both sides during the
+    Student Login integration; before that the derivation had to report
+    nothing and the admin badge was blank for those students. The mapping is
+    now total for every stored combination.
+  - Precedence, which is tested: `rejected` and `suspended` outrank
+    verification and approval; an unverified student reads
+    `pending_verification` even once approved.
 
 ---
 

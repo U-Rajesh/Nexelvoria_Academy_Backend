@@ -16,6 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "tsx --env-file=.env.test --test \"tests/*.test.ts\"",
     "test:watch": "tsx --env-file=.env.test --test --watch \"tests/*.test.ts\"",
+    "db:check": "tsx scripts/db-check.ts",
     "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "verify": "npm run typecheck && npm run build && npm test"
   },
@@ -34,12 +35,14 @@
     "express-rate-limit": "^8.7.4",
     "helmet": "^8.3.0",
     "jsonwebtoken": "^9.0.3",
+    "mssql": "^12.7.15",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/mssql": "^12.3.0",
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
