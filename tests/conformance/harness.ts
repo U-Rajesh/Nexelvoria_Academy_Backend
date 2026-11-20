@@ -1,5 +1,6 @@
 import type { CredentialRepository } from "../../src/modules/auth/credential.repository";
 import type { OtpChallengeRepository } from "../../src/modules/auth/otp.repository";
+import type { StudentRegistrationRepository } from "../../src/modules/auth/registration.repository";
 import type { SessionRepository } from "../../src/modules/auth/session.repository";
 import type { StudentRepository } from "../../src/modules/students/student.repository";
 import type { UserRepository } from "../../src/modules/users/user.repository";
@@ -74,6 +75,7 @@ export type CredentialHarnessFactory = HarnessFactory<CredentialRepository>;
 export type SessionHarnessFactory = HarnessFactory<SessionRepository>;
 export type StudentHarnessFactory = HarnessFactory<StudentRepository>;
 export type OtpHarnessFactory = HarnessFactory<OtpChallengeRepository>;
+export type RegistrationHarnessFactory = HarnessFactory<StudentRegistrationRepository>;
 
 /**
  * Admissions data for a student profile.
