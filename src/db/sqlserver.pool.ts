@@ -232,13 +232,33 @@ export interface SqlServerConnectivity {
  * database is not configured or not reachable, and a probe that throws
  * cannot be used in a health check.
  */
+
 export const verifySqlServerConnection = async (
-  config: SqlServerConfig = loadSqlServerConfig(),
+  config?: SqlServerConfig,
 ): Promise<SqlServerConnectivity> => {
   const startedAt = Date.now();
+  let temporaryPool: sql.ConnectionPool | undefined;
 
   try {
-    const connected = await getSqlServerPool(config);
+    let connected: sql.ConnectionPool;
+
+    if (config !== undefined) {
+      // Explicit configurations must be tested independently.
+      temporaryPool = new sql.ConnectionPool(toDriverConfig(config));
+
+      temporaryPool.on("error", (err: unknown) => {
+        logger.error(
+          "sql server temporary pool error",
+          describeDriverError(err),
+        );
+      });
+
+      connected = await temporaryPool.connect();
+    } else {
+      // Normal application checks reuse the shared pool.
+      connected = await getSqlServerPool();
+    }
+
     const result = await connected.request().query<{
       probe: number;
       version: string;
@@ -248,7 +268,9 @@ export const verifySqlServerConnection = async (
     const latencyMs = Date.now() - startedAt;
 
     if (row?.probe !== 1) {
-      logger.error("sql server probe returned an unexpected result", { latencyMs });
+      logger.error("sql server probe returned an unexpected result", {
+        latencyMs,
+      });
 
       return { ok: false, latencyMs };
     }
@@ -267,14 +289,30 @@ export const verifySqlServerConnection = async (
     };
   } catch (err) {
     const described = describeDriverError(err);
+    const latencyMs = Date.now() - startedAt;
 
-    logger.error("sql server probe failed", { ...described, latencyMs: Date.now() - startedAt });
+    logger.error("sql server probe failed", {
+      ...described,
+      latencyMs,
+    });
 
     return {
       ok: false,
-      latencyMs: Date.now() - startedAt,
+      latencyMs,
       driverErrorName: String(described["driverErrorName"]),
       driverErrorCode: String(described["driverErrorCode"]),
     };
+  } finally {
+    if (temporaryPool !== undefined) {
+      try {
+        await temporaryPool.close();
+      } catch (err) {
+        logger.warn(
+          "sql server temporary pool did not close cleanly",
+          describeDriverError(err),
+        );
+      }
+    }
   }
 };
+

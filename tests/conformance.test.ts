@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createTestHarness } from "./fakes";
 import { describeCredentialRepositoryContract } from "./conformance/credential.conformance";
 import { describeOtpRepositoryContract } from "./conformance/otp.conformance";
+import { describeStudentRegistrationRepositoryContract } from "./conformance/registration.conformance";
 import { describeSessionRepositoryContract } from "./conformance/session.conformance";
 import {
   describeStudentRepositoryContract,
@@ -69,6 +70,10 @@ describeOtpRepositoryContract("in-memory fake", () => ({
   repo: fakes().container.repositories.otpChallenges,
 }));
 
+describeStudentRegistrationRepositoryContract("in-memory fake", () => ({
+  repo: fakes().container.repositories.studentRegistration,
+}));
+
 describeStudentRepositoryContract("in-memory fake", () => {
   const h = fakes();
 
@@ -97,6 +102,7 @@ describe("conformance suite wiring", () => {
       "sessions",
       "otpChallenges",
       "students",
+      "studentRegistration",
     ] as const;
 
     const h = fakes();
