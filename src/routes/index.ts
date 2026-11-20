@@ -1,9 +1,11 @@
 import { Router, type RequestHandler } from "express";
 
 import type { AppContainer } from "../container/container";
+import { createAuthenticate } from "../middleware/authenticate.middleware";
 import { createCourseRoutes } from "../modules/courses/course.routes";
 import { healthRoutes } from "../modules/health/health.routes";
 import { createStudentRoutes } from "../modules/students/student.routes";
+import { createTeacherRoutes } from "../modules/teachers/teacher.routes";
 
 /**
  * The API v1 route registry - the ONLY place module routers are mounted.
@@ -83,7 +85,21 @@ export const createApiV1Router = (
       get courses() {
         return container.repositories.courses;
       },
-      ...(authenticate === undefined ? {} : { authenticate }),
+      // MERGE (nex_b_development + nex_b_main), both behaviours kept:
+      //   - an INJECTED `authenticate` (the dev harness passes one) wins;
+      //   - otherwise the existing middleware is built here, as nex_b_main
+      //     did, and applied by the course router to its 7 management routes
+      //     only (public routes stay anonymous). Its `sessions` dependency is
+      //     a lazy resolver, so nothing is resolved at boot: with no session
+      //     adapter registered, a request carrying a token gets 503 and one
+      //     without gets 401 - fail closed.
+      // OPEN DECISION (backend lead): whether production should wire
+      // authentication at all - see the `authenticate` parameter note above.
+      authenticate:
+        authenticate ??
+        createAuthenticate({
+          sessions: () => container.repositories.sessions,
+        }),
     }),
   );
   // router.use("/enrollments", ...);
@@ -96,7 +112,24 @@ export const createApiV1Router = (
       ...(authenticate === undefined ? {} : { authenticate }),
     }),
   );
-  // router.use("/teachers", ...);
+  router.use(
+    "/teachers",
+    createTeacherRoutes({
+      get teachers() {
+        return container.repositories.teachers;
+      },
+      // Same rule as /courses: the injected middleware when supplied, else
+      // the existing one built here. Its `sessions` dependency is already a
+      // lazy resolver, so nothing is resolved at boot: with no session
+      // adapter registered, a request carrying a token gets 503 and one
+      // without a token gets 401 - fail closed.
+      authenticate:
+        authenticate ??
+        createAuthenticate({
+          sessions: () => container.repositories.sessions,
+        }),
+    }),
+  );
 
   // Last, so a module route always wins over anything passed in, and still
   // ahead of the 404 handler that `createApp` registers after this router.

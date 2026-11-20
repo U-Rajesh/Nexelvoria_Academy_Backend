@@ -361,6 +361,34 @@ interface StudentSort {
   status count (e.g. `cancelled`), or only some? Nothing specifies this yet; the
   fake currently counts any enrolment row.
 
+**Teacher sorting — `TeacherRepository.findMany(filter, pagination, sort?)`**
+*(added with Teacher Management `GET /teachers`; optional third argument,
+backward compatible)*
+
+```ts
+interface TeacherSort {
+  field: "name" | "createdAt" | "experienceYears"; // TEACHER_SORT_FIELDS
+  order: "asc" | "desc";
+}
+```
+
+- **Supported fields:** `name`, `createdAt`, `experienceYears`. The service
+  validates `field` against `TEACHER_SORT_FIELDS`
+  (`src/modules/teachers/teacher.types.ts`); map each field to its column with
+  a fixed lookup — never interpolate it into SQL.
+- **Default when `sort` is omitted: `ORDER BY createdAt DESC, id ASC`**
+  (newest first), matching the student list.
+- **Always append `id ASC` as the final tiebreaker, regardless of direction**
+  (Q-I1), e.g. `ORDER BY experienceYears DESC, id ASC`.
+- **`name` sorts case-insensitively.** The in-memory fake compares lowercased
+  values with `localeCompare`, which only *approximates* SQL Server's CI
+  collation (Q17). `createdAt` (ISO-8601 UTC) orders correctly as text;
+  `experienceYears` compares numerically.
+- **`sortOrder` without `sortBy` does not change the order.** A request such as
+  `GET /teachers?sortOrder=asc` still returns `createdAt DESC, id ASC`:
+  `sortOrder` applies only to an explicit, allow-listed `sortBy`, and the
+  service passes the default sort in every other case.
+
 **Courses**
 - `slug` lookup — every public course page view
 - Filter by `isPublished` (the public catalogue always filters on it)
