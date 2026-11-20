@@ -18,7 +18,19 @@ import { createTeacherRoutes } from "../modules/teachers/teacher.routes";
  * (health aside) so two developers adding modules in parallel touch
  * different lines and git can merge both without a conflict.
  */
-export const createApiV1Router = (container: AppContainer): Router => {
+export const createApiV1Router = (
+  container: AppContainer,
+  /**
+   * Additional routes, mounted last but still before the 404 handler.
+   *
+   * ALWAYS UNDEFINED IN PRODUCTION - `src/server.ts` calls `createApp()`
+   * with no options. See the note on `CreateAppOptions.extraV1Routes`: this
+   * is a seam for the development-only registration harness in `dev/`, not
+   * a second route registry. A feature module is registered below, by name,
+   * where it can be reviewed.
+   */
+  extraRoutes?: Router,
+): Router => {
   const router = Router();
 
   // `health` takes no dependencies by design: a liveness probe must answer
@@ -35,6 +47,20 @@ export const createApiV1Router = (container: AppContainer): Router => {
   // adapters yet, so that throws RepositoryNotConfiguredError and the app
   // (health included) never starts. A getter defers resolution to the
   // first request that needs it.
+  //
+  // `/auth` IS DELIBERATELY NOT MOUNTED, and that is not an oversight.
+  //
+  // `registration.service.ts` performs three sequential writes (user,
+  // credential, student profile) with no unit of work, so a failure part way
+  // through leaves partial state an operator must repair. Until
+  // open-questions **Q-X1** delivers a transaction - or
+  // `dbo.USP_NXA_Register_Student` collapses the three writes into one call -
+  // there must be no production registration endpoint. The service file says
+  // the same thing in capitals.
+  //
+  // The endpoint is exercised locally through `dev/server.dev.ts`, which
+  // passes its own `/auth` router as `extraV1Routes` and is excluded from
+  // the build. Mounting it HERE would ship it.
   //
   // router.use("/auth", ...);
   router.use(
@@ -77,6 +103,12 @@ export const createApiV1Router = (container: AppContainer): Router => {
       }),
     }),
   );
+
+  // Last, so a module route always wins over anything passed in, and still
+  // ahead of the 404 handler that `createApp` registers after this router.
+  if (extraRoutes !== undefined) {
+    router.use(extraRoutes);
+  }
 
   return router;
 };

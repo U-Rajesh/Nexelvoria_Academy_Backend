@@ -286,7 +286,7 @@ Owning module: `auth`. Source: `authService` (18 methods).
 | # | Method | Path | Purpose | Auth | Roles | Mark |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | POST | `/auth/login` | Authenticate, return token + user | No | public | [C] |
-| 2 | POST | `/auth/register` | Student self-registration | No | public | [C] |
+| 2 | POST | `/auth/register` | Student self-registration — **see 4.1** | No | public | [C] |
 | 3 | POST | `/auth/otp/email/verify` | Verify email OTP | No | public | [C] |
 | 4 | POST | `/auth/otp/mobile/verify` | Verify mobile OTP | No | public | [C] |
 | 5 | POST | `/auth/otp/verify-dual` | Verify both OTPs in one call (BR-001) | No | public | [C] |
@@ -317,11 +317,18 @@ POST /auth/login
   403:      ACCOUNT_PENDING     — email/mobile unverified, or awaiting admin approval
   429:      TOO_MANY_REQUESTS
 
-POST /auth/register
-  body:     StudentRegistrationFormData (frontend form type)
-  201:      { success, data: { studentId, otpChannels: ("email"|"mobile")[] } }
+POST /auth/register                       — see 4.1: LOCAL DEVELOPMENT ONLY today
+  body:     StudentRegistrationFormData (frontend form type), minus
+            `resumeDataUrl` — file storage is unresolved (Q11), so the field is
+            accepted and DISCARDED, never persisted. A real upload would also
+            exceed BODY_LIMIT (1mb) and be rejected with 413.
+  201:      { success, data: { tempStudentId, email, mobile }, message }
   409:      CONFLICT            — email or mobile already registered
-  422:      VALIDATION_ERROR
+  422:      VALIDATION_ERROR    — details[] carries the field-level issues
+  413:      PAYLOAD_TOO_LARGE   — body over BODY_LIMIT
+  429:      TOO_MANY_REQUESTS   — 5 per IP per 15 minutes
+  503:      SERVICE_UNAVAILABLE — a repository was unreachable; nothing written
+  500:      INTERNAL_SERVER_ERROR — partial state was created; see 4.1
 
 POST /auth/otp/verify-dual
   body:     { studentId, emailOtp: string, mobileOtp: string }
@@ -329,6 +336,60 @@ POST /auth/otp/verify-dual
   403:      OTP_EXPIRED | OTP_INVALID
   429:      TOO_MANY_REQUESTS
 ```
+
+### 4.1 `POST /auth/register` — implementation status
+
+**CORRECTED RESPONSE SHAPE (decision D2).** This document previously proposed
+`{ studentId, otpChannels[] }`. The confirmed shape is
+`{ tempStudentId, email, mobile }`, taken from the frontend, which is the
+source of truth: `authService.registerStudent` is typed
+`ApiResponse<{ tempStudentId, email, mobile }>` and `RegisterPage` navigates to
+`/verify-otp?studentId=${result.tempStudentId}`. Amended per D2.
+
+**IMPLEMENTED FOR LOCAL DEVELOPMENT ONLY. NOT PRODUCTION-READY.**
+
+| | Local development | Production |
+| --- | --- | --- |
+| Route mounted | yes, by `dev/server.dev.ts` | **no** — `src/routes/index.ts` mounts no `/auth` |
+| Storage | in-memory fakes, one process | none — no MS SQL Server adapter exists |
+| Atomicity | **none** — three sequential writes | blocked on **Q-X1** |
+| Entry point | `npm run dev:integration` | `npm start` (no registration endpoint) |
+
+What is real in the local implementation: the validation schema (mirrors the
+frontend field for field), argon2id hashing, the `role: "student"` and
+`status: "pending"` the service fixes server-side, the shared
+`Student.id === User.id` key (Q25 option A), the 409 uniqueness guard, the
+standard error envelope, and every security layer `createApp()` installs.
+
+What is NOT implemented, and must not be inferred from a 201:
+
+- **No OTP.** No challenge is issued and no OTP endpoint exists (**Q3**
+  unresolved: BR-001 wants dual OTP, BR-014 disables SMS). The account is left
+  `pending` with both verification flags `false`, which is correct whichever
+  way Q3 resolves. The 201 `message` deliberately does NOT promise an OTP step.
+- **No login.** `POST /auth/login` is unmounted, so a registered account cannot
+  yet sign in.
+- **No resume storage** (**Q11**). Only `resumeFileName` and `resumeFileSize`
+  are kept; `resumeDataUrl` is discarded.
+- **No transaction.** The service writes the user, the credential and the
+  student profile in three independent calls. A failure after the first leaves
+  partial state that an operator must repair: the response is a generic 500 and
+  the precise condition (`incomplete` vs `profile_incomplete`) is recorded in
+  the log, never sent to the client.
+
+**THE PRODUCTION BLOCKER.** Those three writes must become one atomic unit
+before any production route is mounted — either
+`dbo.USP_NXA_Register_Student`, if it wraps all three inserts in one
+transaction, or the unit-of-work port of **Q-X1**. Until then four guards keep
+this out of production: `dev/` is outside `tsconfig.json`'s `include` so it is
+never built into `dist/`; `createProductionContainer()` registers no
+repositories; the in-memory fakes throw under `NODE_ENV=production`; and
+`dev/guard.dev.ts` refuses to load in a production process.
+
+**Known and accepted:** a 409 that names the colliding field confirms an
+address is registered, which is account enumeration. Kept because it is the
+confirmed contract and the behaviour the frontend already has — see
+auth-implementation-plan section 8.2. Changing it is a contract decision.
 
 ### Notes
 
