@@ -673,12 +673,22 @@ describe("the production application is unchanged", () => {
     assert.equal(body["error"], "ROUTE_NOT_FOUND");
   });
 
-  it("mounts no /auth surface at all", async () => {
-    for (const route of ["/api/v1/auth", "/api/v1/auth/login", "/api/v1/auth/me"]) {
-      const res = await server.get(route);
-      assert.equal(res.status, 404, `${route} should not exist`);
-    }
-  });
+  // KEPT FOR REFERENCE, DISABLED AFTER MERGING WITH THE AUTH APIs.
+  //
+  // Written (a8efeca) before the login/refresh/logout/me endpoints were
+  // mounted in src/routes/index.ts. Those are now intentionally part of the
+  // production app (tests/auth.routes.test.ts, tests/authenticate.test.ts
+  // expect GET /auth/me -> 401), so this assertion contradicts them. The
+  // registration guarantee it was protecting is still enforced by the
+  // "mounts NO registration route (Q-X1 still open)" test above.
+  // Delete once both developers agree it is no longer needed.
+  //
+  // it("mounts no /auth surface at all", async () => {
+  //   for (const route of ["/api/v1/auth", "/api/v1/auth/login", "/api/v1/auth/me"]) {
+  //     const res = await server.get(route);
+  //     assert.equal(res.status, 404, `${route} should not exist`);
+  //   }
+  // });
 
   it("still serves the exact health contract", async () => {
     const res = await server.get("/api/v1/health");

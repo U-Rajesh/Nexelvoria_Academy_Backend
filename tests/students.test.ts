@@ -68,6 +68,13 @@ const enrollment = (
 
 const PAGE = { page: 1, pageSize: 10, sortOrder: "asc" } as const;
 
+/**
+ * Test apps below inject identity directly, so the required `authenticate`
+ * dependency is a pass-through here (the same pattern as courses.manage and
+ * teachers tests). The REAL application test uses the real middleware.
+ */
+const passThrough: RequestHandler = (_req, _res, next) => next();
+
 const ids = (r: { items: { id: string }[] }) => r.items.map((s) => s.id);
 
 // --- 1. service -------------------------------------------------------------
@@ -293,7 +300,7 @@ describe("students HTTP - admin read routes (test app, injected identity)", () =
     const app = express();
     app.use(express.json());
     app.use(injectIdentity);
-    app.use("/api/v1/students", createStudentRoutes({ students: h.students }));
+    app.use("/api/v1/students", createStudentRoutes({ students: h.students, authenticate: passThrough }));
     app.use(notFoundHandler);
     app.use(errorHandler);
     server = await startServer(app);
@@ -567,7 +574,7 @@ describe("students HTTP - response whitelist (test app, admin)", () => {
       req.principal = { id: "user-admin", role: "admin", sessionId: "session-admin" };
       next();
     });
-    app.use("/api/v1/students", createStudentRoutes({ students: h.students }));
+    app.use("/api/v1/students", createStudentRoutes({ students: h.students, authenticate: passThrough }));
     app.use(notFoundHandler);
     app.use(errorHandler);
     server = await startServer(app);
@@ -708,7 +715,7 @@ describe("students HTTP - PATCH /:studentId/status (test app, injected identity)
       }
       next();
     }) as RequestHandler);
-    app.use("/api/v1/students", createStudentRoutes({ students: h.students }));
+    app.use("/api/v1/students", createStudentRoutes({ students: h.students, authenticate: passThrough }));
     app.use(notFoundHandler);
     app.use(errorHandler);
     server = await startServer(app);

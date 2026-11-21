@@ -2,12 +2,25 @@
 
 **Audience:** the backend lead (decision owner), the two backend developers,
 and — for the database and frontend items — those teams.
-**Status:** raised at Step 3. None of these is decided.
-**Last updated:** 2026-11-17
+**Status:** raised at Step 3. **Decided so far:**
+- **Q4a** (lockout policy) — option A, permanent lockout until a password
+  reset or an administrator unlock, approved by the backend lead and
+  implemented (`MAX_FAILED_LOGIN_ATTEMPTS` in `src/config/env.ts`;
+  docs/api-contracts.md §4).
+- **Q23** (`switchRole`) — demo-only, settled by the handoff's Q-U1 decision
+  (2026-11-20).
+- **Q25** (user-to-student linkage) — shared key `Student.id === User.id`,
+  ratified 2026-11-20.
+
+The related database-handoff questions **Q-R1, Q-R2 and Q-U1** were decided on
+2026-11-20; all four decisions are recorded in database-handoff.md §17.
+**Every other question here remains undecided.**
+**Last updated:** 2026-11-20
 
 Each question states what is actually unresolved, what it blocks, the options,
-and a recommendation. **A recommendation is not a decision** — nothing here has
-been implemented, and nothing should be until the lead rules on it.
+and a recommendation. **A recommendation is not a decision** — apart from the
+decided questions listed above, nothing here has been implemented, and nothing
+should be until the lead rules on it.
 
 Priority key: **P0** blocks the next step of backend work. **P1** blocks a
 specific module. **P2** should be settled before launch.
@@ -37,7 +50,7 @@ specific module. **P2** should be settled before launch.
 | Q20 | CMS defaults, trainer ownership, question bank | P2 | lead |
 | Q21 | Soft delete vs hard delete | P1 | lead + DB team |
 | Q22 | Audit log immutability and retention | P2 | lead + compliance |
-| Q23 | `switchRole` — client-side role switching | P1 | lead |
+| Q23 | `switchRole` — client-side role switching — **DECIDED: demo-only** | P1 | lead |
 | Q24 | Concurrent edit protection | P2 | lead |
 
 ---
@@ -600,7 +613,13 @@ with whoever owns compliance.
 
 ---
 
-## Q23 — `switchRole` — client-side role switching (P1)
+## Q23 — `switchRole` — client-side role switching (P1) — DECIDED
+
+> **DECIDED 2026-11-20** by the handoff's Q-U1 decision (backend lead +
+> business; database-handoff.md §17.3): `switchRole` is a **demo-only**
+> frontend convenience and **cannot change a user's backend role**. One
+> account has exactly one role; no backend endpoint exists or will be added
+> for it. Original question kept for context below.
 
 `authService.switchRole(role: UserRole): User | null` changes the current user's
 role **client-side**, and `AuthContext` exposes it.
@@ -633,7 +652,28 @@ retrofit after data loss is reported.
 
 ---
 
-## Q25 — How is a `User` linked to a `Student`? (P0, raised at Step 6K — BLOCKING)
+## Q25 — How is a `User` linked to a `Student`? (raised at Step 6K as P0) — DECIDED
+
+> **DECIDED 2026-11-20** (backend lead; database-handoff.md §17.4):
+>
+> 1. **Shared key, ratified:** `Student.id === User.id`. This is the model
+>    already implemented by `StudentRepository.createForUser` (Step 6K-2).
+> 2. **The pending student profile is created during registration**, not at
+>    admin approval.
+> 3. **Admin-created students must follow the same shared-id model.**
+> 4. **Registration must become atomic** once a database transaction
+>    mechanism exists (Q-CR6 / Q-X1, still open). Until then the existing
+>    recoverable `profile_incomplete` behaviour is retained.
+>
+> **Still open, and NOT done:** teacher-to-user linkage (the teacher
+> counterpart of this question), and retiring or redefining the standalone
+> `StudentRepository.create` / `TeacherRepository.create`, which still mint
+> their own ids. The schema expression of the shared key and the transaction
+> mechanism need database-team confirmation.
+>
+> The original question follows, kept for context. Its "Step 6K therefore
+> does not write the student row" and "smallest change" paragraphs are
+> **superseded**: the profile is written through `createForUser`.
 
 **Raised by:** the registration service (Step 6K).
 
@@ -688,8 +728,6 @@ registration HTTP endpoint; `students` module integration with auth.
   every guarded route.
 - **Q11** (file storage) blocks `students`, `assignments` and `cms`.
 - **Q1** (identifiers) blocks repository adapters, though not service logic.
-- **Q25** (user-to-student linkage) blocks storing a registered student's
-  academic profile and the registration endpoint. Raised at Step 6K.
 - **Q4** (undefined business rules) blocks any module touching a missing rule —
   at minimum `assessments` via BR-012.
 

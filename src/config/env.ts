@@ -249,6 +249,21 @@ export const env = {
     process.env["JWT_AUDIENCE"],
     "nexelvoria-academy-api",
   ),
+
+  /**
+   * Consecutive failed logins that lock a credential (decision D4).
+   *
+   * Lockout is PERMANENT until cleared (decision Q4a, option A): there is
+   * no time-based unlock. Until password-reset or account-unlock APIs
+   * exist, a locked account can only be recovered by a controlled database
+   * intervention (`CredentialRepository.clearLockout`). See
+   * docs/api-contracts.md, section 4.
+   */
+  MAX_FAILED_LOGIN_ATTEMPTS: parsePositiveInt(
+    "MAX_FAILED_LOGIN_ATTEMPTS",
+    process.env["MAX_FAILED_LOGIN_ATTEMPTS"],
+    5,
+  ),
 } as const;
 
 export const isProduction = env.NODE_ENV === "production";
