@@ -116,15 +116,7 @@ describe("POST /api/v1/auth/register (development-only)", () => {
 
       const data = body["data"] as Record<string, unknown>;
       // D2: exactly these three fields, no more.
-      // TRANSITIONAL: `tempStudentId` is retained for compatibility and
-      // deprecated; `verificationTicket` is what a client should carry
-      // forward. No student id is placed in a URL any more.
-      assert.deepEqual(Object.keys(data).sort(), [
-        "email",
-        "mobile",
-        "tempStudentId",
-        "verificationTicket",
-      ]);
+      assert.deepEqual(Object.keys(data).sort(), ["email", "mobile", "tempStudentId"]);
       assert.equal(data["email"], "ananya@test.local");
       assert.equal(data["mobile"], "9876543210");
       assert.equal(typeof data["tempStudentId"], "string");
@@ -242,23 +234,7 @@ describe("POST /api/v1/auth/register (development-only)", () => {
     });
 
     it("does not echo the submitted password in a 422", async () => {
-      /**
-       * THE FIXTURE MUST CONTAIN A NON-HEX CHARACTER. This is not arbitrary.
-       *
-       * The assertion scans the RAW body, which is the right strength - an
-       * echo could appear in `message`, in `details`, anywhere. But the body
-       * also carries `requestId`, a hex UUID from `randomUUID()`.
-       *
-       * The previous fixture was "abc", and `a`, `b` and `c` are all valid
-       * hex digits, so roughly 0.55% of UUIDs contain "abc" by chance
-       * (measured over 200,000 draws). This test therefore failed about one
-       * run in 180 with nothing wrong: the password was never echoed, the
-       * substring simply turned up in the correlation id.
-       *
-       * "z" cannot appear in a hex UUID, so the collision is impossible and
-       * the assertion keeps its full strength.
-       */
-      const weak = "zzz";
+      const weak = "abc";
       const res = await server.post(
         "/api/v1/auth/register",
         validInput({ password: weak, confirmPassword: weak }),

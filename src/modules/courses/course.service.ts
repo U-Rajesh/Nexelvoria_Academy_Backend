@@ -345,47 +345,6 @@ const toCourseModules = (modules: CurriculumModuleBody[]): CourseModule[] =>
   }));
 
 /**
- * The ONLY shape a course leaves the MANAGEMENT endpoints in - an explicit
- * WHITELIST of the contract's `Course` fields (api-contracts section 7;
- * frontend `src/types/course.types.ts`).
- *
- * TypeScript types do not strip properties at runtime, so returning the
- * repository object would forward whatever an adapter maps (an internal
- * column, an audit field, a row version). Building the response field by
- * field drops anything not listed here until someone deliberately adds it.
- *
- * Unlike `toPublicCourse` this is the ADMIN view: it keeps `status` and the
- * full curriculum, including paid lesson content, which admins edit. The
- * curriculum reuses `toCourseModules`, the existing explicit tree builder.
- */
-export const toAdminCourse = (course: Course): Course => ({
-  id: course.id,
-  slug: course.slug,
-  title: course.title,
-  shortDescription: course.shortDescription,
-  longDescription: course.longDescription,
-  thumbnailUrl: course.thumbnailUrl,
-  durationWeeks: course.durationWeeks,
-  totalHours: course.totalHours,
-  feeINR: course.feeINR,
-  level: course.level,
-  category: course.category,
-  technologies: [...course.technologies],
-  isPublished: course.isPublished,
-  hasPlacementGuarantee: course.hasPlacementGuarantee,
-  prerequisites: [...course.prerequisites],
-  learningOutcomes: [...course.learningOutcomes],
-  ...(course.status === undefined ? {} : { status: course.status }),
-  ...(course.courseCode === undefined ? {} : { courseCode: course.courseCode }),
-  ...(course.discountedFeeINR === undefined ? {} : { discountedFeeINR: course.discountedFeeINR }),
-  ...(course.eligibilityCriteria === undefined
-    ? {}
-    : { eligibilityCriteria: [...course.eligibilityCriteria] }),
-  ...(course.syllabusPdfUrl === undefined ? {} : { syllabusPdfUrl: course.syllabusPdfUrl }),
-  modules: toCourseModules(course.modules),
-});
-
-/**
  * Builds the course service.
  *
  * IMPORTANT - `deps.courses` is read lazily, inside each method, never
@@ -474,7 +433,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
   async listCourses(query: ManageCourseListQuery): Promise<PaginatedResult<Course>> {
     const sortField = resolveSortField(query.sortBy, COURSE_SORT_FIELDS);
 
-    const result = await deps.courses.findMany(
+    return deps.courses.findMany(
       definedOnly({
         category: query.category,
         level: query.level,
@@ -485,13 +444,6 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
       { page: query.page, pageSize: query.pageSize },
       sortField === undefined ? undefined : { field: sortField, order: query.sortOrder },
     );
-
-    // Built field by field - never the adapter's page object, which could
-    // carry extra properties. Items are whitelisted by `toAdminCourse`.
-    return toPaginatedResult(result.items.map(toAdminCourse), result.total, {
-      page: result.page,
-      pageSize: result.pageSize,
-    });
   },
 
   /** `GET /courses/manage/:courseId` - full course for editing. */
@@ -502,7 +454,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
       throw ApiError.notFound("Course not found");
     }
 
-    return toAdminCourse(course);
+    return course;
   },
 
   /**
@@ -522,9 +474,9 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
     const slug = normaliseSlug(body.slug);
 
     // Q2: no courseCode is generated - it is stored as supplied, or absent.
-    return toAdminCourse(
-      await deps.courses.create(toCreateCourseInput({ ...body, slug })).catch(rethrowAsApiError),
-    );
+    return deps.courses
+      .create(toCreateCourseInput({ ...body, slug }))
+      .catch(rethrowAsApiError);
   },
 
   /**
@@ -563,7 +515,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
       syllabusPdfUrl: body.syllabusPdfUrl,
     });
 
-    return toAdminCourse(await deps.courses.update(id, input).catch(rethrowAsApiError));
+    return deps.courses.update(id, input).catch(rethrowAsApiError);
   },
 
   /**
@@ -575,9 +527,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
    */
   async replaceCurriculum(id: EntityId, modules: CurriculumModuleBody[]): Promise<Course> {
     checkCurriculumIntegrity(id, modules);
-    return toAdminCourse(
-      await deps.courses.replaceCurriculum(id, toCourseModules(modules)).catch(rethrowAsApiError),
-    );
+    return deps.courses.replaceCurriculum(id, toCourseModules(modules)).catch(rethrowAsApiError);
   },
 
   /**
@@ -588,11 +538,9 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
    * `setPublication` call, so status and visibility cannot disagree.
    */
   async setCourseStatus(id: EntityId, status: CourseStatus): Promise<Course> {
-    return toAdminCourse(
-      await deps.courses
-        .setPublication(id, { status, isPublished: isPublishedForStatus(status) })
-        .catch(rethrowAsApiError),
-    );
+    return deps.courses
+      .setPublication(id, { status, isPublished: isPublishedForStatus(status) })
+      .catch(rethrowAsApiError);
   },
 
   /**
@@ -616,11 +564,9 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
 
     const status: CourseStatus = course.isPublished ? "Draft" : "Published";
 
-    return toAdminCourse(
-      await deps.courses
-        .setPublication(id, { status, isPublished: isPublishedForStatus(status) })
-        .catch(rethrowAsApiError),
-    );
+    return deps.courses
+      .setPublication(id, { status, isPublished: isPublishedForStatus(status) })
+      .catch(rethrowAsApiError);
   },
 });
 

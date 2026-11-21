@@ -6,7 +6,6 @@ import type {
   Teacher,
   TeacherAllocation,
   TeacherFilter,
-  TeacherSort,
   UpdateTeacherInput,
 } from "./teacher.types";
 
@@ -22,23 +21,7 @@ export interface TeacherRepository {
 
   existsByEmail(email: string): Promise<boolean>;
 
-  /**
-   * Paginated list. Backs `GET /teachers` (admin).
-   *
-   * `sort` is OPTIONAL - the smallest change that lets the list endpoint
-   * honour the `sortBy`/`sortOrder` contract every collection endpoint has
-   * (api-contracts 3.6); existing callers are unaffected. Its field has
-   * already been checked against `TEACHER_SORT_FIELDS` by the service, so an
-   * adapter maps it to a column with a fixed lookup, never interpolation.
-   * When OMITTED, the default is `createdAt DESC`. In every case `id ASC` is
-   * the final tiebreaker so OFFSET/FETCH paging never repeats or skips rows
-   * (database-handoff Q-I1). `name` sorts case-insensitively.
-   */
-  findMany(
-    filter: TeacherFilter,
-    pagination: PaginationQuery,
-    sort?: TeacherSort,
-  ): Promise<PaginatedResult<Teacher>>;
+  findMany(filter: TeacherFilter, pagination: PaginationQuery): Promise<PaginatedResult<Teacher>>;
 
   create(input: CreateTeacherInput): Promise<Teacher>;
 

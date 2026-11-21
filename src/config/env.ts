@@ -118,12 +118,6 @@ const JWT_SECRET_PLACEHOLDERS = new Set([
 ]);
 
 /**
- * Label carried by every test-only JWT secret. A secret containing it is
- * refused in production, so a test value can never be promoted to a deploy.
- */
-const TEST_ONLY_SECRET_MARKER = "test-only";
-
-/**
  * Validates the JWT signing secret.
  *
  * Production fails closed: a missing, short or placeholder secret throws at
@@ -154,18 +148,7 @@ const parseJwtSecret = (value: string | undefined, nodeEnv: NodeEnv): string => 
         `NODE_ENV=${nodeEnv}; tokens will not survive a restart. Set JWT_SECRET in .env.`,
     );
 
-    // Under NODE_ENV=test the random secret is LABELLED test-only, so the
-    // suite can assert it never runs on a real key (token.test.ts). The
-    // label is not a weakness: the value is still 48 random bytes, and
-    // production refuses any secret carrying it (below).
-    const generated = randomBytes(48).toString("base64url");
-    return nodeEnv === "test" ? `${TEST_ONLY_SECRET_MARKER}-${generated}` : generated;
-  }
-
-  if (nodeEnv === "production" && secret.toLowerCase().includes(TEST_ONLY_SECRET_MARKER)) {
-    throw new Error(
-      "JWT_SECRET is marked test-only and must never be used in production. Set a real random secret.",
-    );
+    return randomBytes(48).toString("base64url");
   }
 
   if (secret.length < MIN_JWT_SECRET_LENGTH) {

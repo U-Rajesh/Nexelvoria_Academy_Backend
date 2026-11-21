@@ -1,12 +1,10 @@
 import type { EntityId, IsoDateTime } from "../../contracts/identifier.contract";
 import type { UserStatus } from "../../contracts/user.contract";
-import type { StudentRepository } from "../students/student.repository";
 import type { UserRepository } from "../users/user.repository";
 import type { User } from "../users/user.types";
 import { logger } from "../../utils/logger";
 import { describeError } from "../../utils/redact";
 import { MOBILE_PATTERN, loginSchema } from "./auth.validation";
-import { issueVerificationTicket } from "./token.service";
 import type { CredentialRepository } from "./credential.repository";
 import type { ConditionalResetResult, CredentialRecord } from "./credential.types";
 import { isCredentialLocked } from "./credential.types";
@@ -102,18 +100,8 @@ export type LoginFailureReason =
   | "invalid_credentials"
   /** Correct password, but the credential is locked out. */
   | "account_locked"
-  /**
-   * Correct password, but the account is not active and the precise reason
-   * could NOT be established - no student repository was supplied, the
-   * lookup failed, or the user has no student profile.
-   *
-   * Deliberately the fallback rather than a guess: see `resolvePending`.
-   */
+  /** Correct password, but the account is not yet active. */
   | "account_pending"
-  /** Correct password, `pending`, and the email is not yet verified. */
-  | "account_pending_verification"
-  /** Correct password, `pending`, email verified, awaiting BR-002 approval. */
-  | "account_pending_approval"
   /** Correct password, but suspended by staff. */
   | "account_suspended"
   /** Correct password, but deactivated. */
@@ -172,24 +160,7 @@ export interface LoginSuccess {
  */
 export type LoginResult =
   | { outcome: "success"; data: LoginSuccess }
-  | {
-      outcome: "failure";
-      reason: LoginFailureReason;
-      /**
-       * Present ONLY for `account_pending_verification`.
-       *
-       * The caller has supplied the correct password, so handing back the
-       * means to continue to email verification reveals nothing the reason
-       * does not already imply. It is issued here rather than by the
-       * controller because this service is already the one that mints tokens
-       * on success, and because the controller is given no user id on a
-       * failure - deliberately, so that a refusal can never become an
-       * account-existence oracle.
-       *
-       * Opaque and purpose-scoped: it cannot authenticate anything.
-       */
-      verificationTicket?: string;
-    };
+  | { outcome: "failure"; reason: LoginFailureReason };
 
 /** Client metadata recorded on the session. Never used for authorization. */
 export interface LoginClientContext {
@@ -204,19 +175,6 @@ export interface LoginServiceDeps {
   users: UserRepository;
   credentials: CredentialRepository;
   sessions: SessionRepository;
-  /**
-   * Student profiles, read ONLY to distinguish "awaiting email verification"
-   * from "awaiting admin approval" when a `pending` account is refused.
-   *
-   * OPTIONAL, and omitting it is a supported configuration rather than a
-   * degraded one: the refusal is then the generic `account_pending`, exactly
-   * as before this parameter existed. That is why every pre-existing login
-   * test still constructs this service without it.
-   *
-   * It is never consulted for an authorization decision - only to choose
-   * which of two equally-refusing messages the client receives.
-   */
-  students?: StudentRepository;
   /**
    * Consecutive failures before lockout.
    *
@@ -257,102 +215,6 @@ const statusRefusal = (status: UserStatus): LoginFailureReason | null => {
   return STATUS_REASONS[status] ?? "account_suspended";
 };
 
-/**
- * Narrows a `pending` refusal into the reason the student can act on.
- *
- * ===========================================================================
- * THE RULE: NEVER GUESS.
- *
- * Only `User.status` is available at the gate, and it says `pending` for two
- * completely different situations - "verify your email" and "wait for an
- * administrator". The student's next action differs, so the UI shows
- * different screens.
- *
- * When the distinction cannot be established, this returns the GENERIC
- * `account_pending` rather than picking one. Reporting
- * `account_pending_approval` on a failed lookup would tell a student to wait
- * for an admin when what they actually need is to enter a code - they would
- * wait for something that is never coming.
- *
- * Four paths reach the generic answer, and all four are deliberate:
- *   - no `students` repository was supplied (the pre-existing behaviour);
- *   - the lookup threw (logged at error - it is an infrastructure fault);
- *   - the user has no student profile (logged at warn - a partial
- *     registration, or a non-student account that is somehow pending);
- *   - anything else unforeseen.
- *
- * This never widens access: every branch still refuses the login.
- * ===========================================================================
- */
-interface PendingOutcome {
-  reason: LoginFailureReason;
-  /** Issued only when the student still needs to verify their email. */
-  verificationTicket?: string;
-}
-
-const resolvePending = async (
-  userId: EntityId,
-  students: StudentRepository | undefined,
-): Promise<PendingOutcome> => {
-  const generic: PendingOutcome = { reason: "account_pending" };
-
-  if (students === undefined) {
-    return generic;
-  }
-
-  let student;
-
-  try {
-    student = await students.findById(userId);
-  } catch (err) {
-    logger.error(
-      "login: could not establish why an account is pending; refusing with the generic reason",
-      { userId, errorType: describeError(err) },
-    );
-
-    return generic;
-  }
-
-  if (student === null) {
-    logger.warn("login: a pending account has no student profile", { userId });
-
-    return generic;
-  }
-
-  if (!student.isEmailVerified) {
-    return {
-      reason: "account_pending_verification",
-      verificationTicket: issueVerificationTicket(userId).ticket,
-    };
-  }
-
-  if (student.adminApprovalStatus === "pending") {
-    return { reason: "account_pending_approval" };
-  }
-
-  /**
-   * Verified, and a decision has already been made - yet the account is
-   * still `pending`.
-   *
-   * Reported GENERICALLY, and this is not laziness. Saying
-   * `account_pending_approval` here would be plainly wrong: an approved
-   * student told to "wait for approval" would wait for something that has
-   * already happened. What they are actually waiting on is ACTIVATION, which
-   * is a separate authorized admin action (BR-002: approval gates payment,
-   * not login) and has no code of its own.
-   *
-   * A rejected student lands here too. Spelling that out is an unresolved
-   * product decision - whether a rejection should be disclosed at sign-in at
-   * all - so nothing is invented.
-   */
-  logger.info("login refused: account approved or rejected but not yet active", {
-    userId,
-    approval: student.adminApprovalStatus,
-  });
-
-  return { reason: "account_pending" };
-};
-
 export interface LoginService {
   login(input: unknown, client?: LoginClientContext): Promise<LoginResult>;
 }
@@ -360,13 +222,10 @@ export interface LoginService {
 /** Outcome of one authorization gate. */
 type GateResult =
   | { ok: true; user: User }
-  | { ok: false; reason: LoginFailureReason; verificationTicket?: string };
+  | { ok: false; reason: LoginFailureReason };
 
 export const createLoginService = (deps: LoginServiceDeps): LoginService => {
-  const fail = (reason: LoginFailureReason, verificationTicket?: string): LoginResult =>
-    verificationTicket === undefined
-      ? { outcome: "failure", reason }
-      : { outcome: "failure", reason, verificationTicket };
+  const fail = (reason: LoginFailureReason): LoginResult => ({ outcome: "failure", reason });
 
   /**
    * Resolves an identifier to a user.
@@ -453,12 +312,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       return { ok: false, reason: "account_locked" };
     }
 
-    const baseStatusFailure = statusRefusal(freshUser.status);
-    const pending =
-      baseStatusFailure === "account_pending"
-        ? await resolvePending(freshUser.id, deps.students)
-        : null;
-    const statusFailure = pending === null ? baseStatusFailure : pending.reason;
+    const statusFailure = statusRefusal(freshUser.status);
 
     if (statusFailure !== null) {
       logger.warn("login refused: account status changed during login", {
@@ -466,9 +320,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
         status: freshUser.status,
       });
 
-      return pending?.verificationTicket === undefined
-        ? { ok: false, reason: statusFailure }
-        : { ok: false, reason: statusFailure, verificationTicket: pending.verificationTicket };
+      return { ok: false, reason: statusFailure };
     }
 
     return { ok: true, user: freshUser };
@@ -570,13 +422,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
         return fail("account_locked");
       }
 
-      const baseSnapshotFailure = statusRefusal(user.status);
-      const snapshotPending =
-        baseSnapshotFailure === "account_pending"
-          ? await resolvePending(user.id, deps.students)
-          : null;
-      const snapshotStatusFailure =
-        snapshotPending === null ? baseSnapshotFailure : snapshotPending.reason;
+      const snapshotStatusFailure = statusRefusal(user.status);
 
       if (snapshotStatusFailure !== null) {
         logger.warn("login refused: account status", {
@@ -584,7 +430,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
           status: user.status,
         });
 
-        return fail(snapshotStatusFailure, snapshotPending?.verificationTicket);
+        return fail(snapshotStatusFailure);
       }
 
       // --- 6. rehash -----------------------------------------------------
@@ -680,7 +526,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
 
       if (!preGate.ok) {
         // Nothing was created, so there is nothing to clean up.
-        return fail(preGate.reason, preGate.verificationTicket);
+        return fail(preGate.reason);
       }
 
       // --- 9. session ----------------------------------------------------
@@ -749,7 +595,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
 
       if (!finalGate.ok) {
         await discardSession();
-        return fail(finalGate.reason, finalGate.verificationTicket);
+        return fail(finalGate.reason);
       }
 
       // --- 11. token ------------------------------------------------------

@@ -36,10 +36,9 @@ export interface CourseRepository {
    * service - adapters may map it to a column directly, never a raw string.
    * When omitted, the adapter applies its own default order.
    *
-   * Either way the ordering MUST be deterministic: adapters append `id ASC`
-   * as the final tiebreaker - ASCENDING regardless of the requested sort
-   * direction (e.g. `ORDER BY feeINR DESC, id ASC`) - so OFFSET/FETCH
-   * paging never repeats or skips rows (database-handoff Q-I1 and §8).
+   * Either way the ordering MUST be deterministic: adapters append the id
+   * as a final tiebreaker so OFFSET/FETCH paging never repeats or skips rows
+   * (database-handoff Q-I1).
    */
   findMany(
     filter: CourseFilter,
@@ -47,16 +46,7 @@ export interface CourseRepository {
     sort?: CourseSort,
   ): Promise<PaginatedResult<Course>>;
 
-  /**
-   * Creates a course as an UNPUBLISHED DRAFT with an EMPTY curriculum:
-   * `status: "Draft"`, `isPublished: false`, `modules: []`.
-   * (`CreateCourseInput` carries none of the three.) Publishing is always a
-   * separate, explicit `setPublication` call; the course service relies on
-   * this so a newly created course can never reach the public catalogue.
-   *
-   * Throws DuplicateRecordError on slug conflict (slugs are unique and
-   * case-insensitive).
-   */
+  /** Creates a course. Throws DuplicateRecordError on slug conflict. */
   create(input: CreateCourseInput): Promise<Course>;
 
   /** Patches metadata. Throws RecordNotFoundError when absent. */

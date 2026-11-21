@@ -541,19 +541,6 @@ describe("JWT configuration", () => {
     assert.match(result.message, /placeholder/);
   });
 
-  it("production refuses a secret marked test-only, at any length", async () => {
-    // The test environment generates "test-only-..." secrets; this proves one
-    // can never be promoted to a production deploy.
-    const result = await runWithEnv({
-      NODE_ENV: "production",
-      CORS_ORIGINS: "https://app.nexelvoria.edu.in",
-      JWT_SECRET: "TEST-ONLY-a-long-enough-value-for-length-checks-0123456789",
-    });
-
-    assert.equal(result.ok, false, "a test-only secret must never ship");
-    assert.match(result.message, /test-only/);
-  });
-
   it("production starts with a valid secret", async () => {
     const result = await runWithEnv({
       NODE_ENV: "production",

@@ -17,30 +17,14 @@ export class ApiError extends Error {
   /** Machine-readable code for the frontend to branch on. */
   readonly code: string;
   readonly details?: FieldIssue[];
-  /**
-   * Set only for the `ACCOUNT_PENDING_VERIFICATION` login refusal, so the
-   * client can continue straight to email verification. See
-   * `ApiFailure.verificationTicket`.
-   */
-  readonly verificationTicket?: string;
   /** true = safe to show the user; false = unexpected, hide the message. */
   readonly isOperational = true;
 
-  constructor(
-    status: HttpStatusCode,
-    message: string,
-    code: string,
-    details?: FieldIssue[],
-    verificationTicket?: string,
-  ) {
+  constructor(status: HttpStatusCode, message: string, code: string, details?: FieldIssue[]) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
-
-    if (verificationTicket !== undefined) {
-      this.verificationTicket = verificationTicket;
-    }
 
     if (details !== undefined) {
       this.details = details;

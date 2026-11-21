@@ -1,4 +1,3 @@
-import type { SortOrder } from "../../contracts/api.contract";
 import type { EntityId } from "../../contracts/identifier.contract";
 import type { User } from "../users/user.types";
 
@@ -56,48 +55,19 @@ export interface TeacherFilter {
   search?: string;
 }
 
-/**
- * Sortable teacher fields - the allow-list every `sortBy` is checked
- * against (api-contracts 3.6 / 3.8). Added with the teacher list endpoint
- * (Teacher Management T1), following the courses and students pattern.
- */
-export const TEACHER_SORT_FIELDS = ["name", "createdAt", "experienceYears"] as const;
-export type TeacherSortField = (typeof TEACHER_SORT_FIELDS)[number];
-
-/** Sort instruction passed to `TeacherRepository.findMany`. */
-export interface TeacherSort {
-  field: TeacherSortField;
-  order: SortOrder;
-}
-
-/**
- * Default order when a caller requests none: newest first, matching the
- * students list. `id ASC` is always the final tiebreaker (see the port).
- */
-export const DEFAULT_TEACHER_SORT: TeacherSort = { field: "createdAt", order: "desc" };
-
 /** Fields accepted when an admin creates a teacher. */
 export type CreateTeacherInput = Omit<
   Teacher,
   "id" | "createdAt" | "role" | "status" | "assignedCourseIds" | "assignedBatchIds" | "rating"
 >;
 
-/**
- * Mutable teacher fields.
- *
- * `avatarUrl` is deliberately NOT here: it is a `User` field (see
- * `UpdateUserInput`) which the adopted identity model treats as owned by
- * the user record (open-questions Q25; student.types.ts). Writing it on the
- * teacher record would diverge from the avatar the signed-in teacher sees.
- * It returns only through the user record, once teacher-to-user linkage is
- * decided. `name` and `mobile` remain listed but are NOT accepted by the
- * PATCH endpoint (deferred on the same linkage decision).
- */
+/** Mutable teacher fields. */
 export type UpdateTeacherInput = Partial<
   Pick<
     Teacher,
     | "name"
     | "mobile"
+    | "avatarUrl"
     | "specialization"
     | "experienceYears"
     | "bio"

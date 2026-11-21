@@ -249,13 +249,7 @@ describe("repository ports (verified through the in-memory adapters)", () => {
       assert.equal(approved.adminApprovalStatus, "approved");
       assert.equal(approved.adminApprovalRemarks, "Documents verified");
       assert.equal(approved.approvedAt, "2026-11-17T08:00:00.000Z");
-
-      // `accountState` is NOT stored. It is derived from status +
-      // isEmailVerified + adminApprovalStatus when a response is built
-      // (`deriveAccountState`), so the repository must not invent one -
-      // a stored copy would be a second source of truth, and the database
-      // has no column for it (database-handoff 16.1).
-      assert.equal(approved.accountState, undefined);
+      assert.equal(approved.accountState, "approved");
     });
 
     it("records a rejection", async () => {
@@ -269,7 +263,7 @@ describe("repository ports (verified through the in-memory adapters)", () => {
       });
 
       assert.equal(rejected.adminApprovalStatus, "rejected");
-      assert.equal(rejected.accountState, undefined, "accountState is derived, not stored");
+      assert.equal(rejected.accountState, "rejected");
     });
 
     it("marks each verification channel independently (BR-001)", async () => {

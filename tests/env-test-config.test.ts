@@ -14,7 +14,7 @@ import { resolve } from "node:path";
 
 const ENV_TEST_PATH = resolve(__dirname, "..", ".env.test");
 
-/** Exactly the variables src/config/env.ts reads. */
+/** Exactly the non-secret variables src/config/env.ts reads. */
 const ALLOWED_KEYS = [
   "NODE_ENV",
   "PORT",
@@ -22,22 +22,9 @@ const ALLOWED_KEYS = [
   "BODY_LIMIT",
   "RATE_LIMIT_MAX",
   "RATE_LIMIT_WINDOW_MINUTES",
-  // Non-secret JWT labels (env.ts `parseJwtLabel`); the token tests require
-  // them to identify the test environment.
-  "JWT_ISSUER",
-  "JWT_AUDIENCE",
-  // Secret-named, so allowed ONLY with an empty value (see below). Pinning
-  // it empty stops a developer's local `.env` secret leaking into tests.
-  "JWT_SECRET",
 ] as const;
 
-/**
- * Secret-named keys that may appear ONLY to pin them empty. Any value at all
- * fails the suite - a committed file must never carry a secret.
- */
-const MUST_BE_EMPTY = ["JWT_SECRET"] as const;
-
-/** Belt and braces: secret-looking names. Each must be in MUST_BE_EMPTY and empty. */
+/** Belt and braces: names that must never appear, even if allow-listed later. */
 const SECRET_KEY_PATTERN = /(SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|PRIVATE|CREDENTIAL|CONNECTION|DSN|_KEY$)/i;
 
 /** Minimal KEY=VALUE parser: skips blanks and comments. */
@@ -72,25 +59,9 @@ describe(".env.test (committed test configuration)", () => {
     assert.deepEqual(unexpected, [], `Not allowed in the committed .env.test: ${unexpected.join(", ")}`);
   });
 
-  it("contains no secret VALUES - secret-named keys exist only pinned empty", () => {
-    const suspicious = [...entries.entries()].filter(
-      ([key, value]) =>
-        SECRET_KEY_PATTERN.test(key) &&
-        !((MUST_BE_EMPTY as readonly string[]).includes(key) && value === ""),
-    );
-
-    assert.deepEqual(
-      suspicious.map(([key]) => key),
-      [],
-      "a secret-named key must be in MUST_BE_EMPTY and have no value",
-    );
-  });
-
-  it("pins JWT_SECRET empty, so the suite uses a generated test-only secret", () => {
-    assert.equal(entries.has("JWT_SECRET"), true, "JWT_SECRET must be pinned");
-    assert.equal(entries.get("JWT_SECRET"), "", "JWT_SECRET must never hold a value here");
-    // Node's --env-file really loaded the empty pin (so dotenv cannot fill it).
-    assert.equal(process.env["JWT_SECRET"], "");
+  it("contains no secret-looking key names", () => {
+    const suspicious = [...entries.keys()].filter((key) => SECRET_KEY_PATTERN.test(key));
+    assert.deepEqual(suspicious, []);
   });
 
   it("is what the running test process actually loaded", () => {

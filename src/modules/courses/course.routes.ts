@@ -1,4 +1,4 @@
-import { Router, type RequestHandler } from "express";
+import { Router } from "express";
 
 import { requireAdmin } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
@@ -38,66 +38,29 @@ import {
  * exist: adding `teacher` to these guards without the allocation check
  * would let every teacher edit every course the day authentication lands.
  *
- * Authentication is supplied through the optional `authenticate` option, the
- * same seam the `students` module uses. OMITTED, nothing sets `req.principal`
- * and every management route answers 401 - which is still production's
- * behaviour today, because wiring authentication there needs a registered
- * session adapter and is the backend lead's decision.
+ * Until Developer 1 ships authentication, nothing sets `req.user`, so every
+ * management route answers 401 in the real application. That is intended.
  *
  * Middleware order per route: GUARD FIRST, then validate. An anonymous
  * caller must get 401 - never a 422 that describes the expected input.
- *
- * (Merged from nex_b_main.) Spelled out, each failing closed:
- *   authenticate  -> WHO is calling     (401; 503 if sessions are unavailable)
- *   requireAdmin  -> MAY they do this   (403)
- *   validate      -> is the input valid (422)
- * nex_b_main made `authenticate` a REQUIRED dependency so a router could
- * never be built without it. It is optional here (nex_b_development); the
- * route registry (src/routes/index.ts) always supplies one, so the runtime
- * behaviour is identical.
  */
-export interface CourseRoutesOptions extends CourseServiceDeps {
-  /**
-   * Authentication middleware, which populates `req.principal`.
-   *
-   * OPTIONAL. Omitted, `requireAdmin` finds no principal and fails closed
-   * with 401 - the behaviour production has today, unchanged.
-   *
-   * It matters because `requireAdmin` ALONE is not enough: without
-   * `authenticate` running first there is no identity to authorise, so a
-   * perfectly valid admin token is refused. That was a real defect caught by
-   * `tests/authorization-matrix.test.ts` - the management endpoints returned
-   * 401 for every caller, admin included.
-   */
-  authenticate?: RequestHandler;
-}
-
-export const createCourseRoutes = (options: CourseRoutesOptions): Router => {
-  const controller = createCourseController(createCourseService(options));
+export const createCourseRoutes = (deps: CourseServiceDeps): Router => {
+  const controller = createCourseController(createCourseService(deps));
   const router = Router();
-
-  /**
-   * Guards for one management route, in order: authenticate, then authorise.
-   * Public catalogue routes take neither.
-   */
-  const guards: RequestHandler[] =
-    options.authenticate === undefined
-      ? [requireAdmin]
-      : [options.authenticate, requireAdmin];
 
   // --- static `/manage` paths: MUST be registered before `/:slug` ----------
   // Otherwise Express matches "manage" as a slug. "manage" is also a
   // reserved slug (RESERVED_COURSE_SLUGS), so no course can shadow it.
   router.get(
     "/manage",
-    ...guards,
+    requireAdmin,
     validate({ query: manageCourseListQuerySchema }),
     controller.listManaged,
   );
 
   router.get(
     "/manage/:courseId",
-    ...guards,
+    requireAdmin,
     validate({ params: courseIdParamsSchema }),
     controller.getManagedById,
   );
@@ -108,25 +71,25 @@ export const createCourseRoutes = (options: CourseRoutesOptions): Router => {
   router.get("/:slug", validate({ params: courseSlugParamsSchema }), controller.getPublicBySlug);
 
   // --- management writes -----------------------------------------------------
-  router.post("/", ...guards, validate({ body: createCourseBodySchema }), controller.create);
+  router.post("/", requireAdmin, validate({ body: createCourseBodySchema }), controller.create);
 
   router.patch(
     "/:courseId",
-    ...guards,
+    requireAdmin,
     validate({ params: courseIdParamsSchema, body: updateCourseBodySchema }),
     controller.update,
   );
 
   router.put(
     "/:courseId/curriculum",
-    ...guards,
+    requireAdmin,
     validate({ params: courseIdParamsSchema, body: curriculumBodySchema }),
     controller.replaceCurriculum,
   );
 
   router.patch(
     "/:courseId/status",
-    ...guards,
+    requireAdmin,
     validate({ params: courseIdParamsSchema, body: courseStatusBodySchema }),
     controller.setStatus,
   );
@@ -134,7 +97,7 @@ export const createCourseRoutes = (options: CourseRoutesOptions): Router => {
   // No body schema: the toggle reads no client input beyond the id.
   router.patch(
     "/:courseId/publish",
-    ...guards,
+    requireAdmin,
     validate({ params: courseIdParamsSchema }),
     controller.togglePublish,
   );

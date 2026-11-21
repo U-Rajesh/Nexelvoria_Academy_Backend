@@ -1,4 +1,4 @@
-import express, { type Application, type RequestHandler, type Router } from "express";
+import express, { type Application, type Router } from "express";
 import cors from "cors";
 import helmet from "helmet";
 
@@ -61,21 +61,6 @@ export interface CreateAppOptions {
    * build (see dev/guard.dev.ts).
    */
   extraV1Routes?: Router;
-
-  /**
-   * Authentication middleware, forwarded to the route registry.
-   *
-   * PRODUCTION PASSES NOTHING, exactly like `extraV1Routes`:
-   * `src/server.ts` calls `createApp()` with no options, so this is inert
-   * there and every guarded route continues to fail closed with 401.
-   *
-   * Its one caller today is `dev/server.dev.ts`, which supplies a real
-   * `createAuthenticate({ sessions })` over the in-memory session store so
-   * the admin approval flow can be exercised end to end. Wiring it in
-   * production requires a registered session adapter and is the backend
-   * lead's decision - see the note in `src/routes/index.ts`.
-   */
-  authenticate?: RequestHandler;
 }
 
 export const createApp = (options: CreateAppOptions = {}): Application => {
@@ -115,10 +100,7 @@ export const createApp = (options: CreateAppOptions = {}): Application => {
   app.use(express.urlencoded({ extended: true, limit: env.BODY_LIMIT }));
 
   // 7. Versioned API routes, built over the injected dependencies.
-  app.use(
-    "/api/v1",
-    createApiV1Router(container, options.extraV1Routes, options.authenticate),
-  );
+  app.use("/api/v1", createApiV1Router(container, options.extraV1Routes));
 
   // 8. Unmatched route -> 404 via the error pipeline.
   app.use(notFoundHandler);

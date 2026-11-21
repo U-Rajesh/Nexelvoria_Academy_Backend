@@ -28,26 +28,6 @@ export interface ApiFailure {
    * it and simply ignores it, so this is backwards compatible.
    */
   requestId?: string;
-
-  /**
-   * A verification ticket, accompanying ONE refusal:
-   * `ACCOUNT_PENDING_VERIFICATION` from `POST /auth/login`.
-   *
-   * THE ONLY DOMAIN-SPECIFIC FIELD ON THIS ENVELOPE, and it is here
-   * deliberately rather than by drift. The refusal and the means to resolve
-   * it belong in the same response: a student who signs in with the correct
-   * password but an unverified email must be able to go straight to the OTP
-   * screen, and the ticket is what identifies their account without putting
-   * a student id in a URL.
-   *
-   * Opaque, short-lived (15 minutes) and purpose-scoped - it cannot
-   * authenticate anything (see `issueVerificationTicket`). Never present on
-   * any other failure, and never sent to a caller who has not already proven
-   * the password.
-   *
-   * Additive and optional, so the frontend's `ApiResponse` ignores it.
-   */
-  verificationTicket?: string;
 }
 
 export type ApiResponse<T = never> = ApiSuccess<T> | ApiFailure;
@@ -73,39 +53,6 @@ export const API_ERROR_CODES = [
   "TOKEN_EXPIRED",
   "FORBIDDEN",
   "INSUFFICIENT_ROLE",
-
-  // --- account state, returned by login ONLY after a correct password ----
-  //
-  // These are safe to distinguish precisely because the caller has already
-  // authenticated: `invalid_credentials` (an unknown user, a missing
-  // credential, or a wrong password) collapses into one generic 401, so a
-  // stranger learns nothing. Anyone seeing a code below already knows the
-  // password, and therefore already knows the account exists.
-  //
-  // The frontend renders a different screen per state, so these must be
-  // distinguishable codes rather than one FORBIDDEN with differing prose -
-  // a UI must branch on a code, never on a message.
-
-  /**
-   * Status is `pending` and the precise reason could NOT be established -
-   * the student repository was unavailable, threw, or the user has no
-   * student profile.
-   *
-   * Deliberately vague, and never substituted with a guess: reporting
-   * `ACCOUNT_PENDING_APPROVAL` here would tell a student to wait for an
-   * administrator when what they actually need is to verify their email.
-   */
-  "ACCOUNT_PENDING",
-  /** Email not yet verified. A verification ticket accompanies this. */
-  "ACCOUNT_PENDING_VERIFICATION",
-  /** Email verified, awaiting BR-002 admin approval. No ticket is issued. */
-  "ACCOUNT_PENDING_APPROVAL",
-  /** Locked after consecutive failed sign-ins. */
-  "ACCOUNT_LOCKED",
-  /** Suspended by staff. */
-  "ACCOUNT_SUSPENDED",
-  /** Deactivated by staff. */
-  "ACCOUNT_DEACTIVATED",
   "NOT_FOUND",
   "ROUTE_NOT_FOUND",
   "CONFLICT",

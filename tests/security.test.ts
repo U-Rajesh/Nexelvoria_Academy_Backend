@@ -238,13 +238,6 @@ describe("security", () => {
       // import time - this is the only honest way to assert the production
       // branch without mutating module state.
       const { execFileSync } = await import("node:child_process");
-      const { randomBytes } = await import("node:crypto");
-
-      // Production now refuses to start without a valid JWT_SECRET (env.ts,
-      // since the auth module), and error.middleware imports env. Supply a
-      // RANDOM secret generated per run - never a committed or reusable
-      // value - through the child's environment, not the script text.
-      const childSecret = randomBytes(48).toString("base64url");
 
       const script = `
         process.env.NODE_ENV = "production";
@@ -265,12 +258,7 @@ describe("security", () => {
       const out = execFileSync(
         process.execPath,
         ["--import", "tsx", "-e", script],
-        {
-          cwd: process.cwd(),
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env, JWT_SECRET: childSecret },
-        },
+        { cwd: process.cwd(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
       );
 
       const result = JSON.parse(out.trim().split("\n").pop() ?? "{}") as {

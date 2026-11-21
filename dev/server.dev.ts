@@ -9,14 +9,7 @@ import { createApp } from "../src/app";
 import { env } from "../src/config/env";
 import { logger } from "../src/utils/logger";
 import { createDevAuthRoutes } from "./auth.dev.routes";
-import {
-  createDevAuthenticate,
-  createDevContainer,
-  createDevLoginService,
-  createDevRegistrationDeps,
-  createDevVerificationService,
-  seedDevAccounts,
-} from "./container.dev";
+import { createDevContainer, createDevRegistrationDeps } from "./container.dev";
 
 /**
  * DEVELOPMENT ONLY - the local Student Registration integration server.
@@ -45,24 +38,9 @@ const container = createDevContainer();
 // to the app after createApp() returns would sit behind notFoundHandler and
 // never be reached.
 const extraV1Routes = Router();
-extraV1Routes.use(
-  "/auth",
-  createDevAuthRoutes({
-    deps: createDevRegistrationDeps(container),
-    verification: createDevVerificationService(container),
-    login: createDevLoginService(container),
-  }),
-);
+extraV1Routes.use("/auth", createDevAuthRoutes({ deps: createDevRegistrationDeps(container) }));
 
-// Passing `authenticate` is what makes `req.principal` exist, and therefore
-// what makes the admin approval endpoints reachable. Production passes
-// nothing (`createApp()` with no options), so there every guarded route
-// still fails closed with 401 - unchanged by this harness.
-const app = createApp({
-  container,
-  extraV1Routes,
-  authenticate: createDevAuthenticate(container),
-});
+const app = createApp({ container, extraV1Routes });
 
 const server = app.listen(env.PORT, () => {
   logger.warn(
@@ -73,56 +51,7 @@ const server = app.listen(env.PORT, () => {
   logger.info(`Environment: ${env.NODE_ENV}`);
   logger.info(`Health:   http://localhost:${env.PORT}/api/v1/health`);
   logger.info(`Register: POST http://localhost:${env.PORT}/api/v1/auth/register`);
-  logger.info(`Verify:   POST http://localhost:${env.PORT}/api/v1/auth/otp/email/verify`);
-  logger.info(`Resend:   POST http://localhost:${env.PORT}/api/v1/auth/otp/email/resend`);
-  logger.info(`Login:    POST http://localhost:${env.PORT}/api/v1/auth/login`);
-  logger.info(`Approve:  POST http://localhost:${env.PORT}/api/v1/students/:studentId/approve`);
-  logger.info(`Reject:   POST http://localhost:${env.PORT}/api/v1/students/:studentId/reject`);
-
   logger.info(`Repositories (in-memory): ${container.registered().join(", ")}`);
-
-  // Seeded last so the credentials are the final thing on screen. Passwords
-  // are generated per process (or read from the environment) - see
-  // seedDevAccounts.
-  void seedDevAccounts(container)
-    .then((accounts) => {
-      logger.warn(
-        "DEVELOPMENT STAFF ACCOUNTS SEEDED - admin, teacher and super_admin. Generated " +
-          "passwords are lost on restart. Never seed accounts like this outside development.",
-        { roles: accounts.map((a) => a.role).join(", ") },
-      );
-
-      /**
-       * Printed with console, NOT the logger, and deliberately so.
-       *
-       * `redact()` strips any context key matching /pass/ - which is exactly
-       * right, and why the log line above carries no password. Rather than
-       * weaken that control for one convenience, the credentials go straight
-       * to stdout from a file that is excluded from the build and refuses to
-       * load under NODE_ENV=production. `src/config/env.ts` prints its own
-       * bootstrap warning the same way: some messages must not pass through
-       * the pipeline they describe.
-       *
-       * THIS IS THE ONLY PLACE A DEVELOPMENT PASSWORD IS EVER SHOWN. No
-       * endpoint returns one and no frontend file contains one.
-       */
-      console.warn("");
-      console.warn("  ── DEVELOPMENT SIGN-IN (local terminal only) ──────────────");
-
-      for (const account of accounts) {
-        const source = account.fromEnvironment ? "from environment" : "generated";
-        console.warn(`  ${account.role.padEnd(11)} ${account.email}`);
-        console.warn(`  ${" ".repeat(11)} ${account.password}   (${source})`);
-      }
-
-      console.warn("  ───────────────────────────────────────────────────────────");
-      console.warn("  Sign in at http://localhost:5173/login");
-      console.warn("  Set DEV_SEED_<ROLE>_PASSWORD in .env for a stable password.");
-      console.warn("");
-    })
-    .catch((err: unknown) => {
-      logger.error("could not seed the development accounts", { err });
-    });
 });
 
 const shutdown = (signal: string): void => {

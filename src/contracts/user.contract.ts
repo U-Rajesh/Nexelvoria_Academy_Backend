@@ -25,15 +25,6 @@ export const ACCOUNT_STATES = [
   "approved",
   "rejected",
   "suspended",
-  /**
-   * Deactivated by staff.
-   *
-   * Added at the Student Login integration. Before it existed,
-   * `deriveAccountState()` had to report `undefined` for a deactivated
-   * account because the union could not express it - so the admin UI showed
-   * no badge at all for those students. The derivation is now total.
-   */
-  "deactivated",
   "locked",
 ] as const;
 export type AccountState = (typeof ACCOUNT_STATES)[number];

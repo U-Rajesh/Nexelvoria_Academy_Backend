@@ -1,16 +1,9 @@
-import { Router, type RequestHandler } from "express";
+import { Router } from "express";
 
 import type { AppContainer } from "../container/container";
-// KEPT FOR REFERENCE, INACTIVE (ownership decision 2026-11-20: Rajesh owns
-// authentication). Used only by the commented-out nex_b_main production
-// `/auth` mount and shared-middleware fallback below.
-// import { env } from "../config/env";
-// import { createAuthenticate } from "../middleware/authenticate.middleware";
-// import { createAuthRoutes } from "../modules/auth/auth.routes";
 import { createCourseRoutes } from "../modules/courses/course.routes";
 import { healthRoutes } from "../modules/health/health.routes";
 import { createStudentRoutes } from "../modules/students/student.routes";
-import { createTeacherRoutes } from "../modules/teachers/teacher.routes";
 
 /**
  * The API v1 route registry - the ONLY place module routers are mounted.
@@ -35,22 +28,6 @@ export const createApiV1Router = (
    * where it can be reviewed.
    */
   extraRoutes?: Router,
-  /**
-   * Authentication middleware, handed to the modules whose routes need an
-   * identity.
-   *
-   * ALWAYS UNDEFINED IN PRODUCTION today - `src/server.ts` calls
-   * `createApp()` with no options. Nothing in the application wires
-   * `createAuthenticate` yet, so passing it here is how the development
-   * harness gets real admin authentication without changing what production
-   * does. Omitted, every guarded route keeps failing closed with 401.
-   *
-   * Wiring this in production is a SHARED ARCHITECTURE DECISION for the
-   * backend lead: with no session adapter registered, `authenticate`
-   * answers 503 rather than 401, which changes the response every existing
-   * guarded route gives today.
-   */
-  authenticate?: RequestHandler,
 ): Router => {
   const router = Router();
 
@@ -58,25 +35,6 @@ export const createApiV1Router = (
   // even when every downstream service, including the database, is down.
   // It is therefore mounted without touching the container.
   router.use(healthRoutes);
-
-  // AUTHENTICATION FOLLOWS nex_b_development (Rajesh owns it).
-  //
-  // The ONLY authentication middleware is the `authenticate` parameter
-  // above. It is injected by `createApp({ authenticate })` - the dev harness
-  // passes `createDevAuthenticate(container)` - and handed unchanged to every
-  // guarded module below (courses, students, teachers), so all of them
-  // validate sessions identically. Production passes nothing, so every
-  // guarded route fails closed with 401 until the backend lead wires it.
-  //
-  // KEPT FOR REFERENCE, INACTIVE: nex_b_main's fallback that built its own
-  // instance when none was injected. Re-enabling it would create a second
-  // construction path for the middleware.
-  //
-  // const sharedAuthenticate: RequestHandler =
-  //   authenticate ??
-  //   createAuthenticate({
-  //     sessions: () => container.repositories.sessions,
-  //   });
 
   // --- Feature modules are mounted below as they are built. ---
   // Each receives only the repositories it needs.
@@ -100,48 +58,15 @@ export const createApiV1Router = (
   //
   // The endpoint is exercised locally through `dev/server.dev.ts`, which
   // passes its own `/auth` router as `extraV1Routes` and is excluded from
-  // the build. Mounting it HERE would ship it. That dev router is also the
-  // ONLY `/auth/login` (with `/register`, `/otp/email/verify` and
-  // `/otp/email/resend`) - Rajesh's implementation.
+  // the build. Mounting it HERE would ship it.
   //
   // router.use("/auth", ...);
-  //
-  // KEPT FOR REFERENCE, INACTIVE: nex_b_main's production `/auth` router
-  // (login / refresh / logout / me with refresh tokens,
-  // src/modules/auth/auth.routes.ts). Mounted here it would answer
-  // `POST /auth/login` before the dev router and shadow Rajesh's login, so
-  // it stays off by the 2026-11-20 ownership decision: Rajesh's
-  // authentication (the dev `/auth` router and the injected `authenticate`)
-  // is the active implementation. The old implementation - that module,
-  // its controller and its tests - is INACTIVE and is NOT part of this
-  // integration commit; it is retained only outside it, pending a decision
-  // on whether to retire it. The block below is kept for reference only.
-  //
-  // router.use(
-  //   "/auth",
-  //   createAuthRoutes({
-  //     get users() {
-  //       return container.repositories.users;
-  //     },
-  //     get credentials() {
-  //       return container.repositories.credentials;
-  //     },
-  //     get sessions() {
-  //       return container.repositories.sessions;
-  //     },
-  //     authenticate: sharedAuthenticate,
-  //     maxFailedLoginAttempts: env.MAX_FAILED_LOGIN_ATTEMPTS,
-  //   }),
-  // );
   router.use(
     "/courses",
     createCourseRoutes({
       get courses() {
         return container.repositories.courses;
       },
-      // Rajesh's injected middleware, applied by the course router to its 7
-      // management routes only; the public catalogue routes stay anonymous.
-      ...(authenticate === undefined ? {} : { authenticate }),
     }),
   );
   // router.use("/enrollments", ...);
@@ -151,21 +76,9 @@ export const createApiV1Router = (
       get students() {
         return container.repositories.students;
       },
-      ...(authenticate === undefined ? {} : { authenticate }),
     }),
   );
-  router.use(
-    "/teachers",
-    createTeacherRoutes({
-      get teachers() {
-        return container.repositories.teachers;
-      },
-      // Same rule as /courses and /students: Rajesh's injected middleware,
-      // applied to all 3 teacher routes. Omitted (production today),
-      // `requireAdmin` fails closed with 401.
-      ...(authenticate === undefined ? {} : { authenticate }),
-    }),
-  );
+  // router.use("/teachers", ...);
 
   // Last, so a module route always wins over anything passed in, and still
   // ahead of the 404 handler that `createApp` registers after this router.
