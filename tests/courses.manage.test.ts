@@ -4,7 +4,10 @@ import assert from "node:assert/strict";
 import express, { type RequestHandler } from "express";
 
 import { createApp } from "../src/app";
+import { createAuthenticate } from "../src/middleware/authenticate.middleware";
+import { createContainer } from "../src/container/container";
 import type { UserRole } from "../src/contracts/user.contract";
+import { generateRefreshToken, issueAccessToken } from "../src/modules/auth/token.service";
 import { errorHandler } from "../src/middleware/error.middleware";
 import { notFoundHandler } from "../src/middleware/not-found.middleware";
 import type { CourseRepository } from "../src/modules/courses/course.repository";
@@ -432,7 +435,15 @@ describe("courses HTTP - management routes (test app, injected identity)", () =>
     const app = express();
     app.use(express.json());
     app.use(injectIdentity);
-    app.use("/api/v1/courses", createCourseRoutes({ courses: h.courses }));
+    // `injectIdentity` stands in for authentication in THIS test app, so the
+    // router's (now required) `authenticate` is a pass-through here. The REAL
+    // authenticate middleware is exercised in the "real authentication"
+    // section below with genuine sessions and signed tokens.
+    const passThrough: RequestHandler = (_req, _res, next) => next();
+    app.use(
+      "/api/v1/courses",
+      createCourseRoutes({ courses: h.courses, authenticate: passThrough }),
+    );
     app.use(notFoundHandler);
     app.use(errorHandler);
     server = await startServer(app);
@@ -712,5 +723,396 @@ describe("courses HTTP - real application (no authentication exists yet)", () =>
   it("still serves the public endpoints", async () => {
     assert.equal((await send("GET", "")).status, 200);
     assert.equal((await send("GET", "/seeded-course")).status, 200);
+  });
+});
+
+// --- 4. REAL application, REAL authentication (signed JWT + real session) ------
+
+/**
+ * The 7 management routes with a valid body each. `slug` varies per call so
+ * repeated POSTs never collide. Expected success status per route.
+ */
+const managementRoutes = (slug: string): [string, string, unknown, number][] => [
+  ["GET", "/manage", undefined, 200],
+  ["GET", "/manage/course-x", undefined, 200],
+  ["POST", "", createBody({ slug }), 201],
+  ["PATCH", "/course-x", { title: "Renamed" }, 200],
+  ["PUT", "/course-x/curriculum", { modules: [] }, 200],
+  ["PATCH", "/course-x/status", { status: "Active" }, 200],
+  ["PATCH", "/course-x/publish", undefined, 200],
+];
+
+describe("courses HTTP - real application with real authentication", () => {
+  const h = createTestHarness();
+  let server: TestServer;
+  let slugSeq = 0;
+  const nextSlug = () => `auth-course-${(slugSeq += 1)}`;
+
+  /** Opens a REAL session in the session fake and mints a REAL signed token. */
+  const login = async (role: UserRole) => {
+    const userId = `user-${role}`;
+    const refresh = generateRefreshToken();
+    const session = await h.sessions.create({
+      userId,
+      refreshTokenHash: refresh.tokenHash,
+      expiresAt: refresh.expiresAt,
+    });
+    const { token } = issueAccessToken({ userId, role, sessionId: session.sessionId });
+    return { token, userId, sessionId: session.sessionId };
+  };
+
+  const send = (method: string, path: string, body?: unknown, token?: string) =>
+    fetch(`${server.url}/api/v1/courses${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        ...(token === undefined ? {} : { Authorization: `Bearer ${token}` }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+
+  before(async () => {
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    server = await startServer(
+      createApp({
+        container: h.container,
+        authenticate: createAuthenticate({
+          sessions: () => h.container.repositories.sessions,
+        }),
+      }),
+    );
+  });
+
+  after(async () => {
+    await server.close();
+  });
+
+  beforeEach(() => {
+    h.reset();
+    seeded(h);
+  });
+
+  for (const role of ["admin", "super_admin"] as const) {
+    it(`a ${role} with a valid session succeeds on all 7 management routes`, async () => {
+      const { token } = await login(role);
+
+      for (const [method, path, body, expected] of managementRoutes(nextSlug())) {
+        const res = await send(method, path, body, token);
+        assert.equal(res.status, expected, `${role} ${method} ${path}`);
+        assert.equal((await json(res))["success"], true, `${role} ${method} ${path}`);
+      }
+    });
+  }
+
+  it("401 UNAUTHENTICATED on all 7 routes without a token, and nothing is written", async () => {
+    for (const [method, path, body] of managementRoutes(nextSlug())) {
+      const res = await send(method, path, body);
+      assert.equal(res.status, 401, `${method} ${path}`);
+      assert.equal((await json(res))["error"], "UNAUTHENTICATED", `${method} ${path}`);
+    }
+    const stored = await h.courses.findById("course-x");
+    assert.equal(stored?.title, "Seeded");
+    assert.equal(stored?.status, "Draft");
+    assert.equal(h.courses.count, 1);
+  });
+
+  it("401 on all 7 routes for a forged or malformed token", async () => {
+    for (const bad of ["not-a-jwt", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.forged-signature"]) {
+      for (const [method, path, body] of managementRoutes(nextSlug())) {
+        const res = await send(method, path, body, bad);
+        assert.equal(res.status, 401, `${bad.slice(0, 10)} ${method} ${path}`);
+      }
+    }
+  });
+
+  for (const role of ["student", "teacher"] as const) {
+    it(`403 INSUFFICIENT_ROLE on all 7 routes for an authenticated ${role}; nothing written`, async () => {
+      const { token } = await login(role);
+
+      for (const [method, path, body] of managementRoutes(nextSlug())) {
+        const res = await send(method, path, body, token);
+        assert.equal(res.status, 403, `${role} ${method} ${path}`);
+        assert.equal((await json(res))["error"], "INSUFFICIENT_ROLE");
+      }
+      assert.equal((await h.courses.findById("course-x"))?.status, "Draft");
+      assert.equal(h.courses.count, 1);
+    });
+  }
+
+  it("401 once the session is revoked, even with a still-valid token", async () => {
+    const { token, userId, sessionId } = await login("admin");
+    assert.equal((await send("GET", "/manage", undefined, token)).status, 200);
+
+    await h.sessions.revokeSession({ sessionId, userId, reason: "logout" });
+    assert.equal((await send("GET", "/manage", undefined, token)).status, 401);
+  });
+
+  it("authentication runs before authorization and validation", async () => {
+    // Anonymous + invalid body -> 401 (not 422).
+    assert.equal((await send("POST", "", { nonsense: true })).status, 401);
+
+    // Authenticated student + invalid body -> 403 (not 422).
+    const { token } = await login("student");
+    assert.equal((await send("POST", "", { nonsense: true }, token)).status, 403);
+
+    // Authenticated admin + invalid body -> now validation runs: 422.
+    const admin = await login("admin");
+    assert.equal((await send("POST", "", { nonsense: true }, admin.token)).status, 422);
+  });
+
+  it("role hints in headers or body are ignored - only the signed token counts", async () => {
+    const { token } = await login("student");
+    const res = await fetch(`${server.url}/api/v1/courses/course-x/status`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-User-Role": "admin" },
+      body: JSON.stringify({ status: "Active", role: "admin" }),
+    });
+    assert.equal(res.status, 403);
+  });
+
+  describe("public catalogue is unchanged and never role-dependent", () => {
+    beforeEach(async () => {
+      seeded(h, { id: "course-pub", slug: "published-course", status: "Published", isPublished: true });
+    });
+
+    it("stays anonymous: list and detail answer without any token", async () => {
+      assert.equal((await send("GET", "")).status, 200);
+      assert.equal((await send("GET", "/published-course")).status, 200);
+    });
+
+    it("lists only published courses - the seeded draft is hidden", async () => {
+      const body = await json(await send("GET", ""));
+      const slugs = (body["data"] as { items: { slug: string }[] }).items.map((c) => c.slug);
+      assert.deepEqual(slugs, ["published-course"]);
+    });
+
+    it("never exposes an unpublished course's detail - even to an admin token", async () => {
+      const anonymous = await send("GET", "/seeded-course");
+      assert.equal(anonymous.status, 404);
+
+      // A valid admin token does NOT widen the public path: it is not
+      // role-dependent (api-contracts section 7).
+      const { token } = await login("admin");
+      const withAdmin = await send("GET", "/seeded-course", undefined, token);
+      assert.equal(withAdmin.status, 404);
+
+      const listWithAdmin = await json(await send("GET", "", undefined, token));
+      assert.deepEqual(
+        (listWithAdmin["data"] as { items: { slug: string }[] }).items.map((c) => c.slug),
+        ["published-course"],
+      );
+    });
+
+    it("the admin path is where drafts are visible, to an authenticated admin only", async () => {
+      const { token } = await login("admin");
+      const body = await json(await send("GET", "/manage", undefined, token));
+      assert.equal((body["data"] as { total: number }).total, 2);
+    });
+  });
+});
+
+// --- 5. REAL application, EMPTY container (production state) -------------------
+
+describe("courses HTTP - production state (no adapters registered)", () => {
+  let server: TestServer;
+
+  before(async () => {
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    // No adapters are registered, so the injected middleware's session
+    // lookup fails and the guarded routes must answer 503.
+    const productionContainer = createContainer({});
+    server = await startServer(
+      createApp({
+        container: productionContainer,
+        authenticate: createAuthenticate({
+          sessions: () => productionContainer.repositories.sessions,
+        }),
+      }),
+    );
+  });
+
+  after(async () => {
+    await server.close();
+  });
+
+  it("boots: course routes resolve their dependencies lazily", async () => {
+    assert.equal((await server.get("/api/v1/health")).status, 200);
+  });
+
+  it("401 on all 7 management routes without a token", async () => {
+    for (const [method, path, body] of managementRoutes("prod-anon")) {
+      const res = await fetch(`${server.url}/api/v1/courses${path}`, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      assert.equal(res.status, 401, `${method} ${path}`);
+    }
+  });
+
+  it("503 SERVICE_UNAVAILABLE - never access - on all 7 routes when sessions cannot be checked", async () => {
+    const { token } = issueAccessToken({ userId: "user-admin", role: "admin", sessionId: "s-unchecked" });
+
+    for (const [method, path, body] of managementRoutes("prod-token")) {
+      const res = await fetch(`${server.url}/api/v1/courses${path}`, {
+        method,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      assert.equal(res.status, 503, `${method} ${path}`);
+      assert.equal((await json(res))["error"], "SERVICE_UNAVAILABLE", `${method} ${path}`);
+    }
+  });
+});
+
+// --- 6. explicit admin response mapping -------------------------------------------
+
+/**
+ * Every field a management response may carry: the contract's `Course`.
+ * Written out HERE, independently of `toAdminCourse`, so the test fails if
+ * the whitelist drifts in either direction.
+ */
+const PERMITTED_COURSE_FIELDS = [
+  "id", "slug", "courseCode", "title", "shortDescription", "longDescription", "thumbnailUrl",
+  "durationWeeks", "totalHours", "feeINR", "discountedFeeINR", "level", "category",
+  "technologies", "modules", "isPublished", "status", "hasPlacementGuarantee",
+  "prerequisites", "learningOutcomes", "eligibilityCriteria", "syllabusPdfUrl",
+].sort();
+
+const LEAK_PATTERN = /LEAKED|internalNotes|rowVersion|createdByUserId|storageKey|debugSql/;
+
+/** A course with every permitted field set, plus internal fields at every level. */
+const leakyCourse = (): Course => {
+  const modules = tree("course-x") as unknown as Record<string, unknown>[];
+  modules[0]!["internalNotes"] = "LEAKED-module";
+  const chapter = (modules[0]!["chapters"] as Record<string, unknown>[])[0]!;
+  chapter["rowVersion"] = "LEAKED-chapter";
+  (chapter["lessons"] as Record<string, unknown>[])[0]!["storageKey"] = "s3://LEAKED/lesson";
+
+  return {
+    id: "course-x",
+    slug: "leaky-course",
+    courseCode: "CRS-LEAK-1",
+    title: "Leaky",
+    shortDescription: "Short",
+    longDescription: "Long",
+    thumbnailUrl: "https://cdn.test/t.png",
+    durationWeeks: 10,
+    totalHours: 100,
+    feeINR: 1000,
+    discountedFeeINR: 900,
+    level: "Beginner",
+    category: "Testing",
+    technologies: ["TS"],
+    modules: modules as unknown as CourseModule[],
+    isPublished: false,
+    status: "Draft",
+    hasPlacementGuarantee: false,
+    prerequisites: [],
+    learningOutcomes: ["x"],
+    eligibilityCriteria: ["Graduates"],
+    syllabusPdfUrl: "https://cdn.test/s.pdf",
+    // Internal / future columns an adapter might wrongly map:
+    internalNotes: "LEAKED-course",
+    rowVersion: "LEAKED-rv",
+    createdByUserId: "LEAKED-user",
+  } as unknown as Course;
+};
+
+describe("courses service - explicit admin response mapping", () => {
+  const leakyRepo = (): CourseRepository => {
+    const row = leakyCourse();
+    return {
+      findById: async () => row,
+      findMany: async () => ({
+        items: [row],
+        total: 41,
+        page: 3,
+        pageSize: 20,
+        totalPages: 3,
+        debugSql: "SELECT * FROM Courses -- LEAKED",
+      }),
+      create: async () => row,
+      update: async () => row,
+      replaceCurriculum: async () => row,
+      setPublication: async () => row,
+    } as unknown as CourseRepository;
+  };
+
+  it("every management operation returns only contract fields - nothing internal at any depth", async () => {
+    const service = createCourseService({ courses: leakyRepo() });
+
+    const outputs: [string, Course][] = [
+      ["getCourseById", await service.getCourseById("course-x")],
+      ["createCourse", await service.createCourse(createBody({ slug: "mapped-create" }))],
+      ["updateCourse", await service.updateCourse("course-x", { title: "x" })],
+      ["replaceCurriculum", await service.replaceCurriculum("course-x", tree("course-x"))],
+      ["setCourseStatus", await service.setCourseStatus("course-x", "Active")],
+      ["togglePublish", await service.togglePublish("course-x")],
+      ["listCourses item", (await service.listCourses(PAGE)).items[0]!],
+    ];
+
+    for (const [name, out] of outputs) {
+      assert.deepEqual(Object.keys(out).sort(), PERMITTED_COURSE_FIELDS, name);
+      assert.doesNotMatch(JSON.stringify(out), LEAK_PATTERN, name);
+    }
+  });
+
+  it("keeps the full admin curriculum, including paid lesson content and status", async () => {
+    const out = await createCourseService({ courses: leakyRepo() }).getCourseById("course-x");
+
+    assert.equal(out.status, "Draft");
+    assert.deepEqual(out.modules, tree("course-x"));
+  });
+
+  it("builds the page explicitly: extra adapter properties on the page object never leak", async () => {
+    const page = await createCourseService({ courses: leakyRepo() }).listCourses({
+      ...PAGE,
+      page: 3,
+      pageSize: 20,
+    });
+
+    assert.deepEqual(Object.keys(page).sort(), ["items", "page", "pageSize", "total", "totalPages"]);
+    assert.equal(page.total, 41);
+    assert.equal(page.page, 3);
+    assert.equal(page.pageSize, 20);
+    assert.equal(page.totalPages, 3); // ceil(41 / 20), derived by toPaginatedResult
+    assert.doesNotMatch(JSON.stringify(page), LEAK_PATTERN);
+  });
+
+  it("over HTTP with real authentication, a stored internal field never reaches the client", async () => {
+    const h = createTestHarness();
+    h.courses.seed(leakyCourse()); // the fake stores the extra fields as given
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    const server = await startServer(
+      createApp({
+        container: h.container,
+        authenticate: createAuthenticate({
+          sessions: () => h.container.repositories.sessions,
+        }),
+      }),
+    );
+
+    try {
+      const refresh = generateRefreshToken();
+      const session = await h.sessions.create({
+        userId: "user-admin",
+        refreshTokenHash: refresh.tokenHash,
+        expiresAt: refresh.expiresAt,
+      });
+      const { token } = issueAccessToken({ userId: "user-admin", role: "admin", sessionId: session.sessionId });
+      const headers = { Authorization: `Bearer ${token}` };
+
+      for (const path of ["/api/v1/courses/manage/course-x", "/api/v1/courses/manage"]) {
+        const res = await server.get(path, { headers });
+        assert.equal(res.status, 200, path);
+        assert.doesNotMatch(await res.text(), LEAK_PATTERN, path);
+      }
+    } finally {
+      await server.close();
+    }
   });
 });

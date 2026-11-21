@@ -1,6 +1,8 @@
 import { createContainer, type AppContainer } from "../../src/container/container";
 import { InMemoryCourseRepository } from "./in-memory-course.repository";
 import { InMemoryCredentialRepository } from "./in-memory-credential.repository";
+import { InMemoryOtpChallengeRepository } from "./in-memory-otp.repository";
+import { InMemoryStudentRegistrationRepository } from "./in-memory-registration.repository";
 import { InMemorySessionRepository } from "./in-memory-session.repository";
 import { InMemoryEnrollmentRepository } from "./in-memory-enrollment.repository";
 import { InMemoryStudentRepository } from "./in-memory-student.repository";
@@ -18,6 +20,8 @@ export interface TestHarness {
   container: AppContainer;
   credentials: InMemoryCredentialRepository;
   sessions: InMemorySessionRepository;
+  otpChallenges: InMemoryOtpChallengeRepository;
+  studentRegistration: InMemoryStudentRegistrationRepository;
   users: InMemoryUserRepository;
   students: InMemoryStudentRepository;
   teachers: InMemoryTeacherRepository;
@@ -37,6 +41,8 @@ export interface TestHarness {
 export const createTestHarness = (): TestHarness => {
   const credentials = new InMemoryCredentialRepository();
   const sessions = new InMemorySessionRepository();
+  const otpChallenges = new InMemoryOtpChallengeRepository();
+  const studentRegistration = new InMemoryStudentRegistrationRepository();
   const users = new InMemoryUserRepository();
   const enrollments = new InMemoryEnrollmentRepository();
   // Connected to the enrolment fake so `filter.batchId` resolves through
@@ -50,6 +56,8 @@ export const createTestHarness = (): TestHarness => {
   const container = createContainer({
     credentials: () => credentials,
     sessions: () => sessions,
+    otpChallenges: () => otpChallenges,
+    studentRegistration: () => studentRegistration,
     users: () => users,
     students: () => students,
     teachers: () => teachers,
@@ -61,6 +69,8 @@ export const createTestHarness = (): TestHarness => {
     container,
     credentials,
     sessions,
+    otpChallenges,
+    studentRegistration,
     users,
     students,
     teachers,
@@ -69,6 +79,8 @@ export const createTestHarness = (): TestHarness => {
     reset: () => {
       credentials.reset();
       sessions.reset();
+      otpChallenges.reset();
+      studentRegistration.reset();
       users.reset();
       students.reset();
       teachers.reset();
@@ -80,6 +92,8 @@ export const createTestHarness = (): TestHarness => {
 
 export { InMemoryCourseRepository } from "./in-memory-course.repository";
 export { InMemoryCredentialRepository } from "./in-memory-credential.repository";
+export { InMemoryOtpChallengeRepository } from "./in-memory-otp.repository";
+export { InMemoryStudentRegistrationRepository } from "./in-memory-registration.repository";
 export { InMemorySessionRepository } from "./in-memory-session.repository";
 export { InMemoryEnrollmentRepository } from "./in-memory-enrollment.repository";
 export { InMemoryStudentRepository } from "./in-memory-student.repository";

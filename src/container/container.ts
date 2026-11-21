@@ -1,4 +1,6 @@
 import type { CredentialRepository } from "../modules/auth/credential.repository";
+import type { OtpChallengeRepository } from "../modules/auth/otp.repository";
+import type { StudentRegistrationRepository } from "../modules/auth/registration.repository";
 import type { SessionRepository } from "../modules/auth/session.repository";
 import type { CourseRepository } from "../modules/courses/course.repository";
 import type { EnrollmentRepository } from "../modules/enrollments/enrollment.repository";
@@ -49,6 +51,21 @@ export interface RepositoryRegistry {
   credentials: CredentialRepository;
   /** Server-side sessions: the seam that makes revocation possible. */
   sessions: SessionRepository;
+  /**
+   * One-time passcode challenges. Email verification today; the purpose is
+   * stored as data so another channel is an additive change (Q3, BR-014).
+   */
+  otpChallenges: OtpChallengeRepository;
+  /**
+   * Student self-registration as ONE atomic operation.
+   *
+   * Deliberately NOT expressible as `users` + `credentials` + `students`:
+   * the datastore performs all three writes inside one transaction, so the
+   * sequencing is already its own. This is the single sanctioned coarse
+   * port - transaction-design.md section 2.2, Route A - and nothing else
+   * may cite it as a precedent.
+   */
+  studentRegistration: StudentRegistrationRepository;
   users: UserRepository;
   students: StudentRepository;
   teachers: TeacherRepository;
@@ -149,6 +166,12 @@ export const createContainer = (factories: RepositoryFactories = {}): AppContain
     },
     get sessions() {
       return resolve("sessions");
+    },
+    get otpChallenges() {
+      return resolve("otpChallenges");
+    },
+    get studentRegistration() {
+      return resolve("studentRegistration");
     },
     get users() {
       return resolve("users");

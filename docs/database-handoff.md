@@ -361,6 +361,34 @@ interface StudentSort {
   status count (e.g. `cancelled`), or only some? Nothing specifies this yet; the
   fake currently counts any enrolment row.
 
+**Teacher sorting — `TeacherRepository.findMany(filter, pagination, sort?)`**
+*(added with Teacher Management `GET /teachers`; optional third argument,
+backward compatible)*
+
+```ts
+interface TeacherSort {
+  field: "name" | "createdAt" | "experienceYears"; // TEACHER_SORT_FIELDS
+  order: "asc" | "desc";
+}
+```
+
+- **Supported fields:** `name`, `createdAt`, `experienceYears`. The service
+  validates `field` against `TEACHER_SORT_FIELDS`
+  (`src/modules/teachers/teacher.types.ts`); map each field to its column with
+  a fixed lookup — never interpolate it into SQL.
+- **Default when `sort` is omitted: `ORDER BY createdAt DESC, id ASC`**
+  (newest first), matching the student list.
+- **Always append `id ASC` as the final tiebreaker, regardless of direction**
+  (Q-I1), e.g. `ORDER BY experienceYears DESC, id ASC`.
+- **`name` sorts case-insensitively.** The in-memory fake compares lowercased
+  values with `localeCompare`, which only *approximates* SQL Server's CI
+  collation (Q17). `createdAt` (ISO-8601 UTC) orders correctly as text;
+  `experienceYears` compares numerically.
+- **`sortOrder` without `sortBy` does not change the order.** A request such as
+  `GET /teachers?sortOrder=asc` still returns `createdAt DESC, id ASC`:
+  `sortOrder` applies only to an explicit, allow-listed `sortBy`, and the
+  service passes the default sort in every other case.
+
 **Courses**
 - `slug` lookup — every public course page view
 - Filter by `isPublished` (the public catalogue always filters on it)
@@ -893,3 +921,170 @@ over this table, do not project `password_hash` into anything the application
 reads for display, and do not write it into an audit table. If an audit trail of
 password changes is wanted, record the **fact and the timestamp**, never the
 value or the hash.
+
+---
+
+## 16. Student Registration and email verification (added at Phase 3)
+
+Phase 3 completed the registration and email-verification flow **against the
+in-memory fakes**. Everything below is what we need from you to run the same
+flow against MS SQL Server. Nothing here is implemented yet, and we have
+**invented no stored procedure signature, schema or connection string**.
+
+### 16.1 What the application now does
+
+- Registers a student: creates a `User`, a credential (argon2id hash) and a
+  `Student` profile — still **three sequential writes, no transaction** (Q-X1).
+- Issues a six-digit email passcode, stores only a **keyed HMAC-SHA256** of
+  it, and enforces a 10-minute expiry, a 5-attempt ceiling, a 60-second
+  resend cooldown and 5 sends per 15 minutes.
+- On success marks `Student.isEmailVerified = true`. `accountState` is
+  **derived, not stored** — see `src/modules/students/account-state.ts`. You
+  do **not** need an `accountState` column.
+- Mobile OTP is **descoped** (Q3 resolved email-only). No mobile verification
+  table or column is required beyond the existing `isMobileVerified` flag,
+  which stays `false`.
+
+### 16.2 NEW TABLE REQUIRED — OTP challenges
+
+Backs `OtpChallengeRepository` (`src/modules/auth/otp.repository.ts`). We
+describe the **fields and behaviour the port needs**; the table name, exact
+types, keys and indexes are yours to choose.
+
+| Field | Purpose | Notes |
+| --- | --- | --- |
+| id | primary key | Same identifier decision as Q1 |
+| userId | owner | FK to the users table |
+| purpose | what the code is for | Today one value, `email_verification`. Keep it a column, not a flag — a second purpose must not need a schema change |
+| codeHash | the stored secret | **64-character lowercase hex** (HMAC-SHA256). Never the code itself |
+| destination | the address it was sent to | A student's email address, so **personal data** — include it in whatever retention and access rules apply |
+| expiresAt | expiry instant | UTC |
+| attempts | failed verification count | Integer, default 0 |
+| consumedAt | when it was spent | **Nullable.** NULL means "still live" |
+| createdAt | when it was issued | See the clock rule in 16.3 |
+
+**Index requests.** The two hot paths are: the newest unconsumed challenge
+for a `(userId, purpose)` pair, and a count of challenges for a
+`(userId, purpose)` pair since an instant. Please index for those; we do not
+prescribe the form.
+
+### 16.3 THREE CONTRACTS THE ADAPTER MUST HONOUR
+
+These are correctness requirements, not preferences. The in-memory fake
+implements all three, so a SQL adapter that does not will pass our unit tests
+and then fail in production — the one thing a fake must never allow.
+
+1. **incrementAttempts must be a single atomic statement** — an
+   `UPDATE ... SET attempts = attempts + 1` returning the **post-increment**
+   value. A read-modify-write lets two concurrent guesses both read 4 and
+   both write 5, handing an attacker a free extra attempt past the ceiling.
+
+2. **consume must be conditional and must report whether it wrote.**
+
+       UPDATE <table> SET consumedAt = @now
+       WHERE id = @id AND consumedAt IS NULL;
+       SELECT @@ROWCOUNT;
+
+   A `@@ROWCOUNT` of 0 is how we detect that a concurrent request already
+   consumed the challenge. **That boolean is the entire one-time-use
+   guarantee.** With an unconditional update, two requests presenting the
+   same valid code would both succeed and the caller would apply its side
+   effect twice.
+
+3. **createdAt is supplied by the application — do not default it.** Expiry
+   is measured from `expiresAt`, and the cooldown and send window from
+   `createdAt`. If the adapter stamped `createdAt` with `GETUTCDATE()` the
+   two timestamps would come from different clocks, and any skew between the
+   database and application servers would make the cooldown and the TTL
+   disagree about when the challenge was issued. One clock must decide both.
+
+Also, per section 9: a unique-constraint violation must surface as
+`DuplicateRecordError`, a write against a missing id as
+`RecordNotFoundError`, and **no driver error may escape the adapter**.
+
+### 16.4 WHAT WE NEED FOR dbo.USP_NXA_Register_Student
+
+We have been told this procedure may exist. **We do not have its definition
+and have assumed nothing about it.** Before writing the adapter we need, in
+writing:
+
+1. **Does it exist?** If not, say so and we will use parameterised queries
+   against the agreed schema instead.
+2. **The full parameter list** — name, SQL type, length or precision,
+   nullability and default for every parameter.
+3. **What it returns** — a result set (with column names and types), output
+   parameters, or a return code. We need the **new user id** back, because
+   the API response carries it as `tempStudentId` and the student profile is
+   keyed by it.
+4. **THE TRANSACTION QUESTION, which matters most of all:** does it insert
+   the user, the credential **and** the student profile inside a **single
+   transaction**?
+   - **If yes**, our three-write problem (Q-X1) disappears: the transaction
+     region in `registration.service.ts` collapses into one repository call,
+     the partial-state outcomes (`incomplete`, `profile_incomplete`) become
+     unreachable, and **the production registration route can be mounted.**
+   - **If no**, we need the unit-of-work port of Q-X1 instead, and that
+     changes our repository interfaces — so we must know before building
+     adapters, not after.
+5. **How it reports a duplicate email or mobile** — a specific return code, a
+   `RAISERROR`/`THROW` with a known number, or a native unique-index
+   violation (2601/2627). We must map it to `DuplicateRecordError` to produce
+   the agreed 409, and we will not guess which.
+6. **Whether it hashes the password. It must not.** Hashing is argon2id in
+   the application (`password.service.ts`); the procedure must accept the
+   already-hashed value as an opaque string. Please confirm it attempts no
+   hashing of its own.
+7. **Whether it sets `status`.** Registration must produce
+   `status = 'pending'` — BR-001 verification and BR-002 approval both
+   precede activation. Confirm whether the procedure fixes this itself or
+   expects it as a parameter.
+
+**The same seven questions apply to any other procedure you intend to be the
+only interface.** The six named in earlier discussion —
+`USP_NXA_Generate_OTP`, `USP_NXA_Revoke_Session`, `USP_NXA_Create_Teacher`,
+`USP_NXA_Update_Student_Status`, `USP_NXA_Update_Student_Profile` and
+`USP_NXA_Create_Course` — **appear nowhere in this repository and we hold no
+definitions for them.** If they exist, please send them; if they do not, we
+will assume parameterised queries.
+
+### 16.5 CONNECTION DETAILS WE NEED (and how to send them)
+
+No driver is installed and the repository holds no credentials. We read
+configuration only through `src/config/env.ts`. The variables we expect to
+add, once you confirm the access method:
+
+| Variable | Meaning | Secret? |
+| --- | --- | --- |
+| `SQLSERVER_HOST` | hostname or instance | No |
+| `SQLSERVER_PORT` | default 1433 | No |
+| `SQLSERVER_DATABASE` | database name | No |
+| `SQLSERVER_USER` | login, if SQL authentication | No |
+| `SQLSERVER_PASSWORD` | password, if SQL authentication | **YES** |
+| `SQLSERVER_ENCRYPT` | `true` in any shared environment | No |
+| `SQLSERVER_TRUST_SERVER_CERT` | development only, if the certificate is untrusted | No |
+| `SQLSERVER_POOL_MAX` | pool size per application instance | No |
+
+Still open from sections 11 and 12, and needed before we write a line of
+adapter code: **Q-C1** access method (direct `mssql` driver,
+procedures-only, or a data service in front), **Q-C2** procedures versus
+parameterised queries, **Q-C3** authentication (SQL, Windows/AD, or Entra ID
+managed identity — we prefer managed identity, which removes the one secret
+above entirely), **Q-C4** pool sizing, **Q-C5** separate dev/test/prod
+databases (**we need a development instance before any of this is
+testable**), **Q-C7** TLS, and **Q-M1–M5** migration ownership.
+
+**Please do not send credentials by email or chat.** Use the agreed secret
+store. Nothing in this repository contains or will contain a username,
+password or connection string.
+
+### 16.6 What stays blocked until the above arrives
+
+- The **production** `/auth/register`, `/auth/otp/email/verify` and
+  `/auth/otp/email/resend` routes. All three exist today only in the
+  development harness (`dev/`), which is excluded from the build.
+- `createProductionContainer()` still registers **no** repositories, so the
+  production application has no registration, verification or OTP storage at
+  all.
+- Student Registration **cannot be called complete**: it has never run
+  against a real database, and the passcode is written to the application log
+  rather than emailed, because no mail provider is configured either.

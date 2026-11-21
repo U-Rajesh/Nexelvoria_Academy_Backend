@@ -83,6 +83,9 @@ export const errorHandler: ErrorRequestHandler = (
       message: err.message,
       error: err.code,
       ...(err.details === undefined ? {} : { details: err.details }),
+      ...(err.verificationTicket === undefined
+        ? {}
+        : { verificationTicket: err.verificationTicket }),
     });
     return;
   }
