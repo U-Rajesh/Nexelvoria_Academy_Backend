@@ -118,6 +118,12 @@ const JWT_SECRET_PLACEHOLDERS = new Set([
 ]);
 
 /**
+ * Label carried by every test-only JWT secret. A secret containing it is
+ * refused in production, so a test value can never be promoted to a deploy.
+ */
+const TEST_ONLY_SECRET_MARKER = "test-only";
+
+/**
  * Validates the JWT signing secret.
  *
  * Production fails closed: a missing, short or placeholder secret throws at
@@ -148,7 +154,18 @@ const parseJwtSecret = (value: string | undefined, nodeEnv: NodeEnv): string => 
         `NODE_ENV=${nodeEnv}; tokens will not survive a restart. Set JWT_SECRET in .env.`,
     );
 
-    return randomBytes(48).toString("base64url");
+    // Under NODE_ENV=test the random secret is LABELLED test-only, so the
+    // suite can assert it never runs on a real key (token.test.ts). The
+    // label is not a weakness: the value is still 48 random bytes, and
+    // production refuses any secret carrying it (below).
+    const generated = randomBytes(48).toString("base64url");
+    return nodeEnv === "test" ? `${TEST_ONLY_SECRET_MARKER}-${generated}` : generated;
+  }
+
+  if (nodeEnv === "production" && secret.toLowerCase().includes(TEST_ONLY_SECRET_MARKER)) {
+    throw new Error(
+      "JWT_SECRET is marked test-only and must never be used in production. Set a real random secret.",
+    );
   }
 
   if (secret.length < MIN_JWT_SECRET_LENGTH) {
@@ -231,6 +248,21 @@ export const env = {
     "JWT_AUDIENCE",
     process.env["JWT_AUDIENCE"],
     "nexelvoria-academy-api",
+  ),
+
+  /**
+   * Consecutive failed logins that lock a credential (decision D4).
+   *
+   * Lockout is PERMANENT until cleared (decision Q4a, option A): there is
+   * no time-based unlock. Until password-reset or account-unlock APIs
+   * exist, a locked account can only be recovered by a controlled database
+   * intervention (`CredentialRepository.clearLockout`). See
+   * docs/api-contracts.md, section 4.
+   */
+  MAX_FAILED_LOGIN_ATTEMPTS: parsePositiveInt(
+    "MAX_FAILED_LOGIN_ATTEMPTS",
+    process.env["MAX_FAILED_LOGIN_ATTEMPTS"],
+    5,
   ),
 } as const;
 

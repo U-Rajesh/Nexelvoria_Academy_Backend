@@ -46,6 +46,15 @@ import {
  *
  * Middleware order per route: GUARD FIRST, then validate. An anonymous
  * caller must get 401 - never a 422 that describes the expected input.
+ *
+ * (Merged from nex_b_main.) Spelled out, each failing closed:
+ *   authenticate  -> WHO is calling     (401; 503 if sessions are unavailable)
+ *   requireAdmin  -> MAY they do this   (403)
+ *   validate      -> is the input valid (422)
+ * nex_b_main made `authenticate` a REQUIRED dependency so a router could
+ * never be built without it. It is optional here (nex_b_development); the
+ * route registry (src/routes/index.ts) always supplies one, so the runtime
+ * behaviour is identical.
  */
 export interface CourseRoutesOptions extends CourseServiceDeps {
   /**

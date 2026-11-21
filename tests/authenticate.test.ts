@@ -572,13 +572,16 @@ describe("session-aware authentication", () => {
       }
     });
 
-    it("keeps unimplemented auth endpoints absent and student routes protected", async () => {
+    it("exposes auth endpoints only as designed and keeps student routes protected", async () => {
       const server = await startServer(createApp());
 
       try {
-        for (const path of ["/api/v1/auth/login", "/api/v1/auth/me"]) {
-          assert.equal((await server.get(path)).status, 404, `${path} must not exist yet`);
-        }
+        // Login is POST-only: a GET still matches nothing.
+        assert.equal((await server.get("/api/v1/auth/login")).status, 404, "GET /auth/login must not exist");
+        // /auth/me now exists and requires authentication (no session adapter needed for a 401).
+        const me = await server.get("/api/v1/auth/me");
+        assert.equal(me.status, 401, "/auth/me requires authentication");
+        assert.equal((await json(me))["error"], "UNAUTHENTICATED");
         assert.equal((await server.get("/api/v1/students")).status, 401);
       } finally {
         await server.close();

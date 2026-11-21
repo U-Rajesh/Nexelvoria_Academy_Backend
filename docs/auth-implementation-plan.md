@@ -592,6 +592,8 @@ that document, pending your approval of this plan.
   handoff; **auth makes it blocking**, because login resolves an identifier to
   exactly one account. If one person can be both teacher and student with one
   email, login is ambiguous and the token needs multiple roles.
+  **Decided 2026-11-20 (Q-U1):** email globally unique and case-insensitive, one
+  role per account — login stays unambiguous (database-handoff.md §17.3).
 - **Q-A2** Retention for login history (mock keeps 20) and for expired sessions
   and consumed OTPs. Who purges them, and how often?
 - **Q-A3** Index requirements: `email` and `mobile` lookups run on **every**
@@ -622,7 +624,7 @@ Blocking items from `open-questions.md`, plus what this review newly found.
 | **Q10** | Which permission model authorises | Decides whether `requirePermission` exists at all (§7.4) |
 | **Q13** | Token strategy | §5 proposes the resolution; needs ratifying |
 | **Q14** | 2FA methods with SMS off | TOTP + email proposed; SMS hidden while disabled |
-| **Q23** | `switchRole` lets a client change its own role | **No endpoint is proposed.** If users genuinely hold multiple roles, the token design changes |
+| **Q23** | `switchRole` lets a client change its own role | **DECIDED 2026-11-20 (Q-U1): demo-only.** It cannot change a backend role, one account has one role, and no endpoint will be added |
 
 ### New, found in this review
 
@@ -2097,7 +2099,13 @@ Leaving the account at `pending` is correct whichever way Q3 resolves.
 be created but not yet verified, so nobody can reach `active` through
 self-service. That is a gap in the flow, not a defect in this service.
 
-**2. It does not persist the admissions profile.** College, degree, passing
+**2. It does not persist the admissions profile.** *(SUPERSEDED — kept for
+context. Since Step 6K-2 the profile IS persisted through
+`StudentRepository.createForUser`, keyed by the user's own id; that
+shared-key model was ratified as Q25 on 2026-11-20 — see open-questions Q25 and
+database-handoff.md §17.4. Registration is still not atomic; a failed
+profile write is reported as the recoverable `profile_incomplete`.)*
+College, degree, passing
 year, date of birth, gender, address and guardian contact are fully
 validated and then **not written anywhere.**
 
