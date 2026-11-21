@@ -36,6 +36,21 @@ import {
  * `publishedOnly` treats a contradictory `status`; publication changes via
  * `update()`; accent/locale collation (ASCII only).
  *
+ * SQL FIXTURE REQUIREMENTS (no SQL Server fixture exists yet - these bind
+ * the first one):
+ *   - Run ONLY against a DISPOSABLE test database created for these suites.
+ *     `reset()` deletes every row in the tables under test, so a fixture
+ *     must NEVER point at a shared or development database, and its reset
+ *     should refuse to run unless the target is positively identified as
+ *     that disposable database.
+ *   - Do NOT wrap tests in one transaction that is rolled back between
+ *     tests. Overlapping operations (the concurrency tests) must run on
+ *     SEPARATE pooled connections; a single transaction puts them all on one
+ *     connection, serialises them, and hides the races under test.
+ *   - Reset safely between tests: delete or truncate the tables under test
+ *     in foreign-key order and commit, so every connection sees an empty
+ *     state before the next test starts.
+ *
  * Not a test file itself (`npm test` runs `tests/*.test.ts` only);
  * `tests/course-repository.contract.test.ts` invokes it.
  */
@@ -44,7 +59,11 @@ import {
 export interface CourseRepositoryFixture {
   /** The implementation under test. */
   repository: CourseRepository;
-  /** Restores an empty state. SQL: truncate or roll back the test transaction. */
+  /**
+   * Restores an empty state. SQL: delete/truncate the tables under test in a
+   * DISPOSABLE test database - never a rolled-back transaction, never a
+   * shared or development database (see SQL FIXTURE REQUIREMENTS above).
+   */
   reset(): Promise<void>;
   /** The implementation's real `id ASC` order (numeric-aware for sequential keys). */
   compareIds(a: EntityId, b: EntityId): number;
@@ -62,8 +81,8 @@ export const describeCourseRepositoryContract = (
     let fx: CourseRepositoryFixture;
     let repo: CourseRepository;
 
-    // Unique per run and per call, so the suite also works on a shared
-    // database. Lowercase hex + digits + hyphens = a valid slug.
+    // Unique per run and per call, so values never collide with leftover
+    // rows. Lowercase hex + digits + hyphens = a valid slug.
     const run = randomUUID().slice(0, 8);
     let counter = 0;
     const tag = (): string => `${run}-${(counter += 1)}`;

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import express, { type RequestHandler } from "express";
 
 import { createApp } from "../src/app";
+import { createAuthenticate } from "../src/middleware/authenticate.middleware";
 import { createContainer } from "../src/container/container";
 import type { UserRole } from "../src/contracts/user.contract";
 import { generateRefreshToken, issueAccessToken } from "../src/modules/auth/token.service";
@@ -771,7 +772,16 @@ describe("courses HTTP - real application with real authentication", () => {
     });
 
   before(async () => {
-    server = await startServer(createApp({ container: h.container }));
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    server = await startServer(
+      createApp({
+        container: h.container,
+        authenticate: createAuthenticate({
+          sessions: () => h.container.repositories.sessions,
+        }),
+      }),
+    );
   });
 
   after(async () => {
@@ -908,7 +918,19 @@ describe("courses HTTP - production state (no adapters registered)", () => {
   let server: TestServer;
 
   before(async () => {
-    server = await startServer(createApp({ container: createContainer({}) }));
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    // No adapters are registered, so the injected middleware's session
+    // lookup fails and the guarded routes must answer 503.
+    const productionContainer = createContainer({});
+    server = await startServer(
+      createApp({
+        container: productionContainer,
+        authenticate: createAuthenticate({
+          sessions: () => productionContainer.repositories.sessions,
+        }),
+      }),
+    );
   });
 
   after(async () => {
@@ -1063,7 +1085,16 @@ describe("courses service - explicit admin response mapping", () => {
   it("over HTTP with real authentication, a stored internal field never reaches the client", async () => {
     const h = createTestHarness();
     h.courses.seed(leakyCourse()); // the fake stores the extra fields as given
-    const server = await startServer(createApp({ container: h.container }));
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    const server = await startServer(
+      createApp({
+        container: h.container,
+        authenticate: createAuthenticate({
+          sessions: () => h.container.repositories.sessions,
+        }),
+      }),
+    );
 
     try {
       const refresh = generateRefreshToken();

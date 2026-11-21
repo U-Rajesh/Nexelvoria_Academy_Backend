@@ -31,6 +31,21 @@ import {
  * tested); `findByBatch` ordering (compared as sets); mobile uniqueness;
  * accent/locale collation (case-insensitivity is tested with ASCII only).
  *
+ * SQL FIXTURE REQUIREMENTS (no SQL Server fixture exists yet - these bind
+ * the first one):
+ *   - Run ONLY against a DISPOSABLE test database created for these suites.
+ *     `reset()` deletes every row in the tables under test, so a fixture
+ *     must NEVER point at a shared or development database, and its reset
+ *     should refuse to run unless the target is positively identified as
+ *     that disposable database.
+ *   - Do NOT wrap tests in one transaction that is rolled back between
+ *     tests. Overlapping operations (the concurrency tests) must run on
+ *     SEPARATE pooled connections; a single transaction puts them all on one
+ *     connection, serialises them, and hides the races under test.
+ *   - Reset safely between tests: delete or truncate the tables under test
+ *     in foreign-key order and commit, so every connection sees an empty
+ *     state before the next test starts.
+ *
  * This file is not itself a test file (`npm test` runs `tests/*.test.ts`
  * only); `tests/teacher-repository.contract.test.ts` invokes it.
  */
@@ -47,7 +62,11 @@ export interface TeacherRepositoryFixture {
   /** The implementation under test. */
   repository: TeacherRepository;
 
-  /** Restores an empty state. SQL: truncate or roll back the test transaction. */
+  /**
+   * Restores an empty state. SQL: delete/truncate the tables under test in a
+   * DISPOSABLE test database - never a rolled-back transaction, never a
+   * shared or development database (see SQL FIXTURE REQUIREMENTS above).
+   */
   reset(): Promise<void>;
 
   /**

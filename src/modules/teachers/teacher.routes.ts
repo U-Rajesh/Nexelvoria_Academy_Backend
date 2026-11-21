@@ -25,43 +25,48 @@ import {
  *   validate      -> is the input valid (422)
  * so an anonymous caller gets 401 and never a 422 describing the input.
  *
- * `authenticate` is the existing `createAuthenticate` middleware, built once
- * in src/routes/index.ts and passed in - this module neither creates nor
- * modifies middleware.
+ * `authenticate` is the existing `createAuthenticate` middleware, passed in
+ * by src/routes/index.ts - this module neither creates nor modifies
+ * middleware. It is OPTIONAL, following the same pattern as the courses and
+ * students modules (nex_b_development): the route registry forwards the
+ * middleware injected through `createApp({ authenticate })` (the dev
+ * harness), and when it is omitted - production today - `requireAdmin`
+ * alone fails closed with 401 because no authenticated principal exists.
  *
  * ORDERING NOTE FOR LATER TASKS: static paths such as `GET /me` and
  * `GET /public` (api-contracts 6 #5, #13) must be registered ABOVE
  * `/:teacherId`, or Express will treat "me"/"public" as a teacher id.
  */
 export interface TeacherRoutesDeps extends TeacherServiceDeps {
-  authenticate: RequestHandler;
+  authenticate?: RequestHandler;
 }
 
 export const createTeacherRoutes = (deps: TeacherRoutesDeps): Router => {
   const controller = createTeacherController(createTeacherService(deps));
   const router = Router();
-  const { authenticate } = deps;
+
+  const guards: RequestHandler[] =
+    deps.authenticate === undefined
+      ? [requireAdmin]
+      : [deps.authenticate, requireAdmin];
 
   router.get(
     "/",
-    authenticate,
-    requireAdmin,
+    ...guards,
     validate({ query: teacherListQuerySchema }),
     controller.list,
   );
 
   router.get(
     "/:teacherId",
-    authenticate,
-    requireAdmin,
+    ...guards,
     validate({ params: teacherIdParamsSchema }),
     controller.getById,
   );
 
   router.patch(
     "/:teacherId",
-    authenticate,
-    requireAdmin,
+    ...guards,
     validate({ params: teacherIdParamsSchema, body: updateTeacherBodySchema }),
     controller.update,
   );

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import express, { type RequestHandler } from "express";
 
 import { createApp } from "../src/app";
+import { createAuthenticate } from "../src/middleware/authenticate.middleware";
 import { createContainer } from "../src/container/container";
 import type { UserRole } from "../src/contracts/user.contract";
 import { errorHandler } from "../src/middleware/error.middleware";
@@ -773,7 +774,16 @@ describe("teachers HTTP - real application with real authentication", () => {
     });
 
   before(async () => {
-    server = await startServer(createApp({ container: h.container }));
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    server = await startServer(
+      createApp({
+        container: h.container,
+        authenticate: createAuthenticate({
+          sessions: () => h.container.repositories.sessions,
+        }),
+      }),
+    );
   });
 
   after(async () => {
@@ -850,7 +860,19 @@ describe("teachers HTTP - production state (no adapters registered)", () => {
   let server: TestServer;
 
   before(async () => {
-    server = await startServer(createApp({ container: createContainer({}) }));
+    // Rajesh's architecture: authentication is INJECTED through createApp
+    // (as tests/approval.test.ts does), never built by the route registry.
+    // No adapters are registered, so the injected middleware's session
+    // lookup fails and the guarded routes must answer 503.
+    const productionContainer = createContainer({});
+    server = await startServer(
+      createApp({
+        container: productionContainer,
+        authenticate: createAuthenticate({
+          sessions: () => productionContainer.repositories.sessions,
+        }),
+      }),
+    );
   });
 
   after(async () => {
