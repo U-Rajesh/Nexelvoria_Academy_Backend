@@ -73,10 +73,9 @@ export const apiRateLimiter = createRateLimiter({
  * ---------------------------------------------------------------------------
  * Stricter limiters DESIGNED for the authentication endpoints.
  *
- * These are exported but deliberately NOT mounted: the routes they protect
- * (login, OTP, password reset) do not exist yet, and Step 4 does not
- * implement authentication. When those endpoints are built, attach the
- * matching limiter in that module's routes file.
+ * The login limiter is mounted by the auth routes (POST /auth/login). The
+ * OTP and password-reset limiters remain unmounted because those routes do
+ * not exist yet; attach them in the auth routes file when they are built.
  *
  * Why much tighter than the general limit: these endpoints are the ones
  * worth brute-forcing. A 6-digit OTP is 1,000,000 combinations - trivially
@@ -85,12 +84,23 @@ export const apiRateLimiter = createRateLimiter({
  * ---------------------------------------------------------------------------
  */
 
-/** Login: slows credential stuffing. Pair with per-account lockout. */
-export const loginRateLimiter = createRateLimiter({
+/** Login limit: 10 attempts per IP per 15 minutes. Pair with per-account lockout. */
+export const LOGIN_RATE_LIMIT: Readonly<LimiterConfig> = Object.freeze({
   windowMs: 15 * 60 * 1000,
   limit: 10,
   message: "Too many login attempts. Please try again in 15 minutes.",
 });
+
+/**
+ * A fresh login limiter with its own counters. MOUNTED: the auth router
+ * builds one per application instance, so separate apps (e.g. test apps)
+ * never share counters, while a production process - one app - has exactly
+ * one limiter.
+ */
+export const createLoginRateLimiter = (): RequestHandler => createRateLimiter({ ...LOGIN_RATE_LIMIT });
+
+/** Login: slows credential stuffing. Pair with per-account lockout. */
+export const loginRateLimiter = createLoginRateLimiter();
 
 /** OTP verification: the tightest limit, because the secret is only 6 digits. */
 export const otpVerifyRateLimiter = createRateLimiter({

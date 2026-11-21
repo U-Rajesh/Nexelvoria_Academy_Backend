@@ -367,8 +367,13 @@ What is NOT implemented, and must not be inferred from a 201:
   unresolved: BR-001 wants dual OTP, BR-014 disables SMS). The account is left
   `pending` with both verification flags `false`, which is correct whichever
   way Q3 resolves. The 201 `message` deliberately does NOT promise an OTP step.
-- **No login.** `POST /auth/login` is unmounted, so a registered account cannot
-  yet sign in.
+- ~~**No login.** `POST /auth/login` is unmounted, so a registered account cannot
+  yet sign in.~~ **Superseded after merging with the auth APIs (2026-11-20):**
+  `POST /auth/login`, `/auth/refresh`, `/auth/logout` and `GET /auth/me` are
+  mounted in `src/routes/index.ts` (see section 4 table above). Only
+  `/auth/register` stays development-only. A newly registered account is
+  still `pending`, so login refuses it with an `ACCOUNT_*` 403 until it is
+  verified and approved.
 - **No resume storage** (**Q11**). Only `resumeFileName` and `resumeFileSize`
   are kept; `resumeDataUrl` is discarded.
 - **No transaction.** The service writes the user, the credential and the
@@ -401,11 +406,77 @@ auth-implementation-plan section 8.2. Changing it is a contract decision.
 - **`getCurrentUser()` and `switchRole()` are client-side in the mock.**
   `/auth/me` replaces the former. `switchRole` has **no backend equivalent** and
   is deliberately absent — a client that can change its own role is an
-  authorization hole. Flagged as Q23; do not implement it without a decision.
+  authorization hole. **Decided 2026-11-20 (Q-U1 / Q23):** `switchRole` is
+  demo-only and can never change a user's backend role; one account has one
+  role, and no endpoint will be added (database-handoff.md §17.3).
 - Dependencies: `students` (registration creates a student), `settings`
   (`security.maxFailedLogins`, `sessionTimeoutMinutes`), `notifications` (OTP
   and welcome mail).
 - **Blocked by Q3** (dual OTP vs SMS disabled) and **Q13** (token strategy).
+
+### Implemented (Phase 8) — the four session endpoints
+
+Decisions D1–D4 and Q4a (option A) are approved; the routes live in
+`src/modules/auth/auth.routes.ts` and `auth.controller.ts` and are mounted at
+`/auth`. Registration, OTP, password reset, sessions list and login history
+are **not** implemented yet.
+
+| Method | Path | Middleware (after the app-wide stack) | Request | Success |
+| --- | --- | --- | --- | --- |
+| POST | `/auth/login` | login limiter (10 / 15 min / IP) | `{ identifier, password, rememberMe? }` | 200 `{ user, accessToken, expiresIn, refreshToken, refreshTokenExpiresAt, sessionId }` |
+| POST | `/auth/refresh` | none — no access token required | `{ refreshToken }` (D2: JSON body) | 200, same shape as login (rotated pair, same `sessionId`) |
+| POST | `/auth/logout` | `authenticate` → `requireAuthenticated` | Bearer token, no body | 200 `{ success: true, message: "Logged out" }` |
+| GET | `/auth/me` | `authenticate` → `requireAuthenticated` | Bearer token | 200 `{ data: User }` (D3: base User only) |
+
+`user` / `data` is always the base User, built field by field:
+`id, name, email, mobile, role, status, avatarUrl?, createdAt`. No credential,
+lockout or token data ever leaves these endpoints.
+
+**Login refusals (D1).** The password is verified before any account state is
+disclosed, so these never reveal whether an account exists. Failed-attempt
+counts are never returned.
+
+| Reason | HTTP | `error` |
+| --- | --- | --- |
+| invalid credentials / malformed body | 401 | `INVALID_CREDENTIALS` |
+| locked | 403 | `ACCOUNT_LOCKED` |
+| pending | 403 | `ACCOUNT_PENDING` |
+| suspended | 403 | `ACCOUNT_SUSPENDED` |
+| deactivated | 403 | `ACCOUNT_DEACTIVATED` |
+| password changed during login | 409 | `CONFLICT` |
+| storage unavailable | 503 | `SERVICE_UNAVAILABLE` |
+
+**Refresh.** Invalid, missing or reused refresh tokens and a user who is no
+longer active all return the same `401 UNAUTHENTICATED` — reuse is never
+disclosed (the server logs it and revokes the whole session family). Storage
+failure is `503`. The refresh endpoint never returns `TOKEN_EXPIRED`, so a
+client that refreshes on `TOKEN_EXPIRED` cannot be sent into a loop. Two
+concurrent refreshes with the same token: one succeeds, the other is treated
+as reuse and the family (including the winner's new token) is revoked —
+**clients must refresh single-flight**.
+
+**Logout** revokes the current session only; its access token is rejected
+immediately by `authenticate` on every protected route. If the session is
+already gone when it is revoked, logout still returns 200. Repeating logout
+with an already-revoked token gets `401 UNAUTHENTICATED` from `authenticate`
+(no side effects). `503` when the session cannot be revoked — clients must
+clear their local tokens regardless.
+
+**/auth/me** returns `401 UNAUTHENTICATED` if the user no longer exists, the
+login status codes above (`403 ACCOUNT_*`) if the account is no longer
+active, `401 TOKEN_EXPIRED` for an expired access token, and `503` if the user
+lookup fails.
+
+**Lockout (Q4a, option A — temporary).** `MAX_FAILED_LOGIN_ATTEMPTS`
+(default 5) consecutive failures lock the credential **permanently**: there is
+no time-based unlock, and a correct password does not unlock it. Until
+password-reset or account-unlock APIs exist, **recovery requires a controlled
+database intervention** (`CredentialRepository.clearLockout`) performed by an
+authorised operator. Revisit Q4a when those APIs are built.
+
+**Shared authentication.** One `createAuthenticate` instance (built in
+`src/routes/index.ts`) protects `/auth/logout`, `/auth/me`, the course
+management routes, `/students` and `/teachers`. Role checks are unchanged.
 
 ---
 
@@ -585,6 +656,16 @@ POST /students/:studentId/reject
 - Résumé upload needs a storage decision — Q11.
 - Dependencies: `enrollments` (direct enrolment on create), `auth` (lockout
   state), `admin` (audit log).
+- **Identity model (Q25, decided 2026-11-20).** A student's id **is** its user's
+  id (`Student.id === User.id`); registration creates the pending profile.
+  `POST /students` (admin create) **must follow the same shared-id model** —
+  create the user, then the profile keyed by that id. Not yet implemented: the
+  standalone `StudentRepository.create` still mints its own id and must be
+  retired or redefined first (database-handoff.md §17.4–17.5).
+- **`enrolledCourseIds` is derived (Q-R1, decided 2026-11-20).** It lists only
+  courses with an `active` or `completed` enrolment and is for display only;
+  access checks read the enrolment record, never this array
+  (database-handoff.md §17.1). Not yet implemented.
 - **`PATCH /students/:studentId/status` (implemented, Task 3.2).** Body
   `{ "status": "active" | "suspended" | "deactivated" }`; `pending` and any
   other value is `422`; unknown student `404`; returns `StudentProfile`.
@@ -641,6 +722,12 @@ POST /students/:studentId/reject
   authorization rule in the teacher surface:** a teacher may only read or
   mutate data for batches allocated to them. It must be enforced server-side on
   every teacher endpoint, never by trusting a `teacherId` from the client.
+- **Allocation rules (Q-R2, decided 2026-11-20).** The `(teacher, course, batch)`
+  body is retained; `courseId` must match the batch's own course; there is no
+  course-only assignment; `assignedCourseIds`/`assignedBatchIds` are derived
+  response fields; a teacher has access to a course when allocated to at
+  least one of its batches (database-handoff.md §17.2). Not yet implemented —
+  the course check needs a batches module.
 - `/teachers/public` overlaps CMS trainer profiles — Q20 asks which owns it.
 - Dependencies: `batches`, `courses`, `rbac`.
 

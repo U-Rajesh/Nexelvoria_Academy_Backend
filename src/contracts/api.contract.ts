@@ -114,6 +114,14 @@ export const API_ERROR_CODES = [
   "PAYLOAD_TOO_LARGE",
   "MALFORMED_JSON",
   "INTERNAL_SERVER_ERROR",
+  // Login refusals (auth module, decision D1). Disclosed only AFTER the
+  // password has been verified, so they never reveal whether an account
+  // exists.
+  "INVALID_CREDENTIALS",
+  "ACCOUNT_LOCKED",
+  "ACCOUNT_PENDING",
+  "ACCOUNT_SUSPENDED",
+  "ACCOUNT_DEACTIVATED",
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];

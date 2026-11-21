@@ -165,10 +165,12 @@ These are the modelling decisions we flag rather than decide:
    `GET /students?courseId=` filter (`StudentFilter.courseId`), which today
    resolves against `enrolledCourseIds`; its long-term stored-versus-derived
    behaviour remains unresolved until Q-R1 is decided.
+   **DECIDED 2026-11-20 — derived, not stored; see §17.1.**
 2. **`Teacher.assignedCourseIds` / `assignedBatchIds` are two parallel arrays**,
    but an allocation is really a `(teacher, course, batch)` triple — which two
    separate arrays cannot express. We modelled the triple as
    `TeacherAllocation`. **Question Q-R2.**
+   **DECIDED 2026-11-20 — the triple is retained; see §17.2.**
 3. **The curriculum tree is four levels of nested objects.** Four tables, or
    JSON in one column? See **Q-S4**.
 
@@ -309,6 +311,11 @@ corresponds to a `409 CONFLICT` the API must return, so these are
 a teacher and a student with the same email address? This affects whether users
 is one table or several, and it interacts with open-questions Q23 (multi-role
 users).
+
+> **DECIDED 2026-11-20 (backend lead + business) — see §17.3.** Email is globally
+> unique and case-insensitive, mobile is globally unique after normalisation,
+> and one account has exactly one role. Q-U2 (collation) below is **not**
+> decided by this and still needs your confirmation.
 
 **Q-U2 — Case-insensitive uniqueness.** SQL Server's default collation
 (`SQL_Latin1_General_CP1_CI_AS`) is case-insensitive, which happens to be what
@@ -601,10 +608,10 @@ Ordered by how much they block us.
 
 | ID | Question | Owner |
 | --- | --- | --- |
-| Q-R1 | Derive `enrolledCourseIds` from enrolments, or store it | backend — we recommend derive |
-| Q-R2 | Teacher allocation as a `(teacher, course, batch)` triple | backend — we recommend yes |
+| Q-R1 | Derive `enrolledCourseIds` from enrolments, or store it | **DECIDED 2026-11-20: derived** — §17.1 |
+| Q-R2 | Teacher allocation as a `(teacher, course, batch)` triple | **DECIDED 2026-11-20: triple retained** — §17.2 |
 | Q-S4 | Curriculum tree: four tables or JSON | joint decision |
-| Q-U1 | Is email unique across roles or per role | backend + business |
+| Q-U1 | Is email unique across roles or per role | **DECIDED 2026-11-20: globally unique, one role per account** — §17.3 |
 
 ### Needed before launch
 
@@ -1088,3 +1095,108 @@ password or connection string.
 - Student Registration **cannot be called complete**: it has never run
   against a real database, and the passcode is written to the application log
   rather than emailed, because no mail provider is configured either.
+
+## 17. Approved backend decisions (recorded 2026-11-20)
+
+Approved by the backend lead; Q-U1 also has business approval. These settle
+the **application rules**. They do **not** settle storage: every item under
+"still needs the database team" below is yours to confirm, and nothing here
+defines a table, column type, key, index, migration or transaction mechanism.
+**SQL Server implementation remains blocked** on the questions in section 13
+(Q-K1, Q-C1, Q-X1, Q-F4, Q-M1, Q-C5 and the rest) — these decisions do not
+unblock it.
+
+### 17.1 Q-R1 — `Student.enrolledCourseIds` is derived
+
+- **Derived from enrolment records, never stored** on the student.
+- It contains only courses with an enrolment in status `active` or
+  `completed` (`EnrollmentStatus`). `pending_approval`, `approved_unpaid`,
+  `cancelled` and `suspended` enrolments do not appear in it.
+- It is a **response/display field only**. Authorization never reads it:
+  content access, payment eligibility and every other check must verify the
+  enrolment record and its status independently (BR-003).
+- *Not stated by the decision:* whether the `GET /students?courseId=` filter
+  uses the same `active`/`completed` set. Until the lead rules on it, its
+  status set remains open (see `StudentFilter.courseId`).
+- *Still needs the database team:* confirmation that no stored
+  `enrolledCourseIds` column or array is planned, so the enrolments table is
+  the only source.
+- *Implementation status:* **not yet implemented.** The current domain
+  types and the in-memory fake still model the array directly (it is always
+  empty today, because no enrolment flow writes it). Wiring the derivation is
+  a follow-up.
+
+### 17.2 Q-R2 — teacher allocation keeps the triple
+
+- The `(teacherId, courseId, batchId)` shape of `TeacherAllocation` and the
+  `TeacherRepository` allocation methods are **retained unchanged**.
+- `courseId` **must match the course that owns the batch.** An allocation
+  whose `courseId` differs from the batch's course is invalid.
+- **Course-only assignment is not permitted** — every allocation names a
+  batch.
+- `Teacher.assignedCourseIds` and `assignedBatchIds` are **derived
+  response fields**, projected from allocations; they are not a storage
+  shape.
+- **Teacher course access** means the teacher is allocated to **at least one
+  batch belonging to that course.** `isAllocatedToBatch` remains the
+  batch-level authorization primitive.
+- *Still needs the database team:* how allocations are stored, and whether
+  the batch-to-course relationship is enforced in the schema (which would
+  make the stored `courseId` redundant or constrained). That is your call;
+  nothing here prescribes it.
+- *Implementation status:* **not yet implemented.** The course-matches-batch
+  check needs a batches module, which does not exist; the allocation
+  endpoints are contracted but not built.
+
+### 17.3 Q-U1 — account uniqueness and roles
+
+Approved by the backend lead **and the business**.
+
+- **Email is globally unique and case-insensitive** — across all roles, not
+  per role. The application already normalises email to lowercase on write.
+- **Mobile is globally unique after normalisation.** Today's normalisation is
+  the registration/login validation: trimmed, exactly 10 digits starting 6-9
+  (`MOBILE_PATTERN`). Any broader normalisation (for example stripping a
+  `+91` prefix) is not defined yet.
+- **One account has exactly one role.** A person needing two roles uses two
+  accounts with different emails and mobiles.
+- **`switchRole` is demo-only.** It is a frontend mock convenience and can
+  never change a user's role on the backend; no endpoint exists or will be
+  added for it. This also answers open-questions Q23.
+- *Still needs the database team:* the unique constraints themselves and
+  **Q-U2 / open-questions Q17** (collation, and whether uniqueness relies on
+  collation or on the application's normalisation). Those remain open.
+
+### 17.4 Q25 — `Student.id === User.id` (shared key)
+
+- **Ratified:** the existing shared-key model. A student profile's id is the
+  owning user's id; there is no second id. Implemented as
+  `StudentRepository.createForUser`.
+- The **pending student profile is created during registration**
+  (`adminApprovalStatus: "pending"`), not at admin approval.
+- **Admin-created students must follow the same shared-id model**: the user
+  is created first and the profile is keyed by that user's id.
+- Registration **must become atomic** once a database transaction mechanism
+  exists (**Q-X1 / Q-CR6, still open**). Until then the existing recoverable
+  `profile_incomplete` behaviour is retained.
+- *Still needs the database team:* how the shared key is expressed in the
+  schema, its compatibility with the id type (Q-K1), and the transaction
+  mechanism (Q-X1).
+
+### 17.5 Follow-ups — NOT done
+
+These follow from the decisions above and are **future implementation work**,
+not completed:
+
+1. **Teacher-to-user linkage.** Teachers are not yet linked to `users`
+   (`TeacherRepository.create` mints its own id and checks email only among
+   teachers), so the Q-U1 global uniqueness rule is not yet enforced for
+   teachers and a teacher created that way cannot log in. The linkage model
+   for teachers is still to be decided and built.
+2. **Retire or redefine the standalone creation methods.**
+   `StudentRepository.create` and `TeacherRepository.create` still mint
+   their own ids, which does not satisfy the shared-id model. Changing them
+   is a repository interface change and has not been made.
+3. **Implement the Q-R1 derivation** and the **Q-R2 course-matches-batch
+   validation** (the latter after a batches module exists).
+4. **Atomic registration**, once Q-X1 is answered.
