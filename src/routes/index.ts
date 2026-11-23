@@ -1,105 +1,262 @@
 import { Router, type RequestHandler } from "express";
 
 import type { AppContainer } from "../container/container";
+import { createAuthRoutes } from "../modules/auth/auth.routes";
 import { createCourseRoutes } from "../modules/courses/course.routes";
 import { healthRoutes } from "../modules/health/health.routes";
 import { createStudentRoutes } from "../modules/students/student.routes";
+import { createTeacherRoutes } from "../modules/teachers/teacher.routes";
+import { createAdminRoutes, createSuperAdminRoutes } from "../modules/admin/admin.routes";
+import { createEnrollmentRoutes } from "../modules/enrollments/enrollment.routes";
+import { createPublicCmsRoutes, createAdminCmsRoutes } from "../modules/cms/cms.routes";
+import { createPaymentRoutes } from "../modules/payments/payment.routes";
+import { createCertificateRoutes } from "../modules/certificates/certificate.routes";
+import { createPlacementRoutes } from "../modules/placements/placement.routes";
+import { createSupportRoutes } from "../modules/support/support.routes";
+import { createLoginService } from "../modules/auth/login.service";
+import { createVerificationService } from "../modules/auth/verification.service";
+import { createOtpService } from "../modules/auth/otp.service";
+import { resolveOtpDelivery } from "../modules/auth/otp.delivery";
+import { createAuthenticate } from "../middleware/authenticate.middleware";
 
 /**
  * The API v1 route registry - the ONLY place module routers are mounted.
- *
- * It is a FACTORY taking the container, so each module receives its
- * dependencies explicitly instead of importing a global. That is what
- * lets a test build the same router over in-memory repositories.
- *
- * Adding a module is a one-line change here. Keep the list alphabetical
- * (health aside) so two developers adding modules in parallel touch
- * different lines and git can merge both without a conflict.
  */
 export const createApiV1Router = (
   container: AppContainer,
   /**
    * Additional routes, mounted last but still before the 404 handler.
-   *
-   * ALWAYS UNDEFINED IN PRODUCTION - `src/server.ts` calls `createApp()`
-   * with no options. See the note on `CreateAppOptions.extraV1Routes`: this
-   * is a seam for the development-only registration harness in `dev/`, not
-   * a second route registry. A feature module is registered below, by name,
-   * where it can be reviewed.
    */
   extraRoutes?: Router,
   /**
    * Authentication middleware, handed to the modules whose routes need an
    * identity.
-   *
-   * ALWAYS UNDEFINED IN PRODUCTION today - `src/server.ts` calls
-   * `createApp()` with no options. Nothing in the application wires
-   * `createAuthenticate` yet, so passing it here is how the development
-   * harness gets real admin authentication without changing what production
-   * does. Omitted, every guarded route keeps failing closed with 401.
-   *
-   * Wiring this in production is a SHARED ARCHITECTURE DECISION for the
-   * backend lead: with no session adapter registered, `authenticate`
-   * answers 503 rather than 401, which changes the response every existing
-   * guarded route gives today.
    */
   authenticate?: RequestHandler,
 ): Router => {
   const router = Router();
 
-  // `health` takes no dependencies by design: a liveness probe must answer
-  // even when every downstream service, including the database, is down.
-  // It is therefore mounted without touching the container.
+  // `health` takes no dependencies by design.
   router.use(healthRoutes);
 
-  // --- Feature modules are mounted below as they are built. ---
-  // Each receives only the repositories it needs.
-  //
-  // Dependencies are passed as GETTERS, not values. Writing
-  // `{ courses: container.repositories.courses }` would resolve the
-  // repository right here, at boot - and the production container has no
-  // adapters yet, so that throws RepositoryNotConfiguredError and the app
-  // (health included) never starts. A getter defers resolution to the
-  // first request that needs it.
-  //
-  // `/auth` IS DELIBERATELY NOT MOUNTED, and that is not an oversight.
-  //
-  // `registration.service.ts` performs three sequential writes (user,
-  // credential, student profile) with no unit of work, so a failure part way
-  // through leaves partial state an operator must repair. Until
-  // open-questions **Q-X1** delivers a transaction - or
-  // `dbo.USP_NXA_Register_Student` collapses the three writes into one call -
-  // there must be no production registration endpoint. The service file says
-  // the same thing in capitals.
-  //
-  // The endpoint is exercised locally through `dev/server.dev.ts`, which
-  // passes its own `/auth` router as `extraV1Routes` and is excluded from
-  // the build. Mounting it HERE would ship it.
-  //
-  // router.use("/auth", ...);
+  // Authentication endpoints
+  const loginService =
+    container.has("users") && container.has("credentials") && container.has("sessions")
+      ? createLoginService({
+          get users() {
+            return container.repositories.users;
+          },
+          get credentials() {
+            return container.repositories.credentials;
+          },
+          get sessions() {
+            return container.repositories.sessions;
+          },
+          ...(container.has("students")
+            ? {
+                get students() {
+                  return container.repositories.students;
+                },
+              }
+            : {}),
+          maxFailedLoginAttempts: 5,
+        })
+      : undefined;
+
+  if (
+    extraRoutes === undefined &&
+    (container.has("studentRegistration") || loginService !== undefined)
+  ) {
+    const verificationService =
+      container.has("otpChallenges") && container.has("users") && container.has("students")
+        ? createVerificationService({
+            otp: createOtpService({
+              challenges: container.repositories.otpChallenges,
+              delivery: resolveOtpDelivery(),
+            }),
+            get users() {
+              return container.repositories.users;
+            },
+            get students() {
+              return container.repositories.students;
+            },
+          })
+        : undefined;
+
+    router.use(
+      "/auth",
+      createAuthRoutes({
+        ...(container.has("studentRegistration")
+          ? {
+              get studentRegistration() {
+                return container.repositories.studentRegistration;
+              },
+            }
+          : {}),
+        ...(loginService !== undefined ? { login: loginService } : {}),
+        ...(verificationService !== undefined ? { verification: verificationService } : {}),
+      }),
+    );
+  }
+
+  // Resolve authentication middleware
+  const effectiveAuth =
+    authenticate ??
+    (container.has("sessions")
+      ? createAuthenticate({
+          sessions: () => container.repositories.sessions,
+        })
+      : undefined);
+
   router.use(
     "/courses",
     createCourseRoutes({
       get courses() {
         return container.repositories.courses;
       },
-      ...(authenticate === undefined ? {} : { authenticate }),
+      ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
     }),
   );
-  // router.use("/enrollments", ...);
+
   router.use(
     "/students",
     createStudentRoutes({
       get students() {
         return container.repositories.students;
       },
-      ...(authenticate === undefined ? {} : { authenticate }),
+      ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
     }),
   );
-  // router.use("/teachers", ...);
 
-  // Last, so a module route always wins over anything passed in, and still
-  // ahead of the 404 handler that `createApp` registers after this router.
+  if (container.has("enrollments")) {
+    router.use(
+      "/enrollments",
+      createEnrollmentRoutes({
+        get enrollments() {
+          return container.repositories.enrollments;
+        },
+        ...(container.has("courses")
+          ? {
+              get courses() {
+                return container.repositories.courses;
+              },
+            }
+          : {}),
+        ...(container.has("students")
+          ? {
+              get students() {
+                return container.repositories.students;
+              },
+            }
+          : {}),
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
+  if (container.has("teachers")) {
+    router.use(
+      "/teachers",
+      createTeacherRoutes({
+        get teachers() {
+          return container.repositories.teachers;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
+  if (container.has("admin")) {
+    router.use(
+      "/admin",
+      createAdminRoutes({
+        get admin() {
+          return container.repositories.admin;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+
+    router.use(
+      "/super-admin",
+      createSuperAdminRoutes({
+        get admin() {
+          return container.repositories.admin;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
+  if (container.has("cms")) {
+    router.use(
+      "/public",
+      createPublicCmsRoutes({
+        get cms() {
+          return container.repositories.cms;
+        },
+      }),
+    );
+
+    router.use(
+      "/admin/cms",
+      createAdminCmsRoutes({
+        get cms() {
+          return container.repositories.cms;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
+  if (container.has("payments")) {
+    router.use(
+      "/payments",
+      createPaymentRoutes({
+        get payments() {
+          return container.repositories.payments;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
+  if (container.has("certificates")) {
+    router.use(
+      "/certificates",
+      createCertificateRoutes({
+        get certificates() {
+          return container.repositories.certificates;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
+  if (container.has("placements")) {
+    router.use(
+      "/placements",
+      createPlacementRoutes({
+        get placements() {
+          return container.repositories.placements;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
+  if (container.has("support")) {
+    router.use(
+      "/support",
+      createSupportRoutes({
+        get support() {
+          return container.repositories.support;
+        },
+        ...(effectiveAuth === undefined ? {} : { authenticate: effectiveAuth }),
+      }),
+    );
+  }
+
   if (extraRoutes !== undefined) {
     router.use(extraRoutes);
   }

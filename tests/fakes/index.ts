@@ -8,13 +8,15 @@ import { InMemoryEnrollmentRepository } from "./in-memory-enrollment.repository"
 import { InMemoryStudentRepository } from "./in-memory-student.repository";
 import { InMemoryTeacherRepository } from "./in-memory-teacher.repository";
 import { InMemoryUserRepository } from "./in-memory-user.repository";
+import { InMemoryAdminRepository } from "./in-memory-admin.repository";
+import { InMemoryCmsRepository } from "./in-memory-cms.repository";
+import { InMemoryPaymentRepository } from "./in-memory-payment.repository";
+import { InMemoryCertificateRepository } from "./in-memory-certificate.repository";
+import { InMemoryPlacementRepository } from "./in-memory-placement.repository";
+import { InMemorySupportRepository } from "./in-memory-support.repository";
 
 /**
  * TEST-ONLY wiring: a container backed entirely by in-memory fakes.
- *
- * The fakes are handed back alongside the container so a test can seed
- * and assert against them directly while the application resolves the
- * same instances through dependency injection.
  */
 export interface TestHarness {
   container: AppContainer;
@@ -27,17 +29,16 @@ export interface TestHarness {
   teachers: InMemoryTeacherRepository;
   courses: InMemoryCourseRepository;
   enrollments: InMemoryEnrollmentRepository;
+  admin: InMemoryAdminRepository;
+  cms: InMemoryCmsRepository;
+  payments: InMemoryPaymentRepository;
+  certificates: InMemoryCertificateRepository;
+  placements: InMemoryPlacementRepository;
+  support: InMemorySupportRepository;
   /** Clears every fake. Isolation between tests in one file. */
   reset: () => void;
 }
 
-/**
- * Builds a fresh harness.
- *
- * Call it per test (or per suite with `reset()` in a `beforeEach`) - each
- * call creates new fakes AND a new container cache, so no state leaks
- * between tests.
- */
 export const createTestHarness = (): TestHarness => {
   const credentials = new InMemoryCredentialRepository();
   const sessions = new InMemorySessionRepository();
@@ -45,13 +46,15 @@ export const createTestHarness = (): TestHarness => {
   const studentRegistration = new InMemoryStudentRegistrationRepository();
   const users = new InMemoryUserRepository();
   const enrollments = new InMemoryEnrollmentRepository();
-  // Connected to the enrolment fake so `filter.batchId` resolves through
-  // enrolment data, as a real adapter's join would (Task 3.1, Option A), and
-  // to the user fake so `createForUser` can read the identity half of a
-  // student from the user row - the same join a SQL adapter will do (6K-1).
   const students = new InMemoryStudentRepository(enrollments, users);
   const teachers = new InMemoryTeacherRepository();
   const courses = new InMemoryCourseRepository();
+  const admin = new InMemoryAdminRepository();
+  const cms = new InMemoryCmsRepository();
+  const payments = new InMemoryPaymentRepository();
+  const certificates = new InMemoryCertificateRepository();
+  const placements = new InMemoryPlacementRepository();
+  const support = new InMemorySupportRepository();
 
   const container = createContainer({
     credentials: () => credentials,
@@ -63,6 +66,12 @@ export const createTestHarness = (): TestHarness => {
     teachers: () => teachers,
     courses: () => courses,
     enrollments: () => enrollments,
+    admin: () => admin,
+    cms: () => cms,
+    payments: () => payments,
+    certificates: () => certificates,
+    placements: () => placements,
+    support: () => support,
   });
 
   return {
@@ -76,6 +85,12 @@ export const createTestHarness = (): TestHarness => {
     teachers,
     courses,
     enrollments,
+    admin,
+    cms,
+    payments,
+    certificates,
+    placements,
+    support,
     reset: () => {
       credentials.reset();
       sessions.reset();
@@ -86,6 +101,31 @@ export const createTestHarness = (): TestHarness => {
       teachers.reset();
       courses.reset();
       enrollments.reset();
+      admin.admins = [];
+      admin.batches = [];
+      admin.enrollments = [];
+      admin.auditLogs = [];
+      admin.refunds = [];
+      admin.financialOverrides = [];
+      admin.batchStudentsMap.clear();
+      admin.teacherAllocationsMap.clear();
+      cms.banners = [];
+      cms.articles = [];
+      cms.faqs = [];
+      cms.testimonials = [];
+      cms.trainers = [];
+      cms.achievements = [];
+      cms.careers = [];
+      cms.partners = [];
+      cms.collegePartners = [];
+      cms.corporateServices = [];
+      cms.pageContent.clear();
+      cms.enquiries = [];
+      cms.subscribers = [];
+      payments.reset();
+      certificates.reset();
+      placements.reset();
+      support.reset();
     },
   };
 };
@@ -99,3 +139,9 @@ export { InMemoryEnrollmentRepository } from "./in-memory-enrollment.repository"
 export { InMemoryStudentRepository } from "./in-memory-student.repository";
 export { InMemoryTeacherRepository } from "./in-memory-teacher.repository";
 export { InMemoryUserRepository } from "./in-memory-user.repository";
+export { InMemoryAdminRepository } from "./in-memory-admin.repository";
+export { InMemoryCmsRepository } from "./in-memory-cms.repository";
+export { InMemoryPaymentRepository } from "./in-memory-payment.repository";
+export { InMemoryCertificateRepository } from "./in-memory-certificate.repository";
+export { InMemoryPlacementRepository } from "./in-memory-placement.repository";
+export { InMemorySupportRepository } from "./in-memory-support.repository";

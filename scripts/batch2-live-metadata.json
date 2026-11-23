@@ -1,0 +1,2793 @@
+{
+  "timestamp": "2026-11-21T20:35:05.651Z",
+  "user": {
+    "CurrentUser": "nxa_api_service",
+    "CurrentUserAlias": "nxa_api_service",
+    "SessionUser": "nxa_api_service"
+  },
+  "columns": [
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "BatchCode",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 40,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "BatchId",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "BatchName",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 150,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "Capacity",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "int",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 10,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "CourseId",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "EndDate",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "date",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "ScheduleDescription",
+      "ORDINAL_POSITION": 8,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 500,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "StartDate",
+      "ORDINAL_POSITION": 9,
+      "DATA_TYPE": "date",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "Status",
+      "ORDINAL_POSITION": 10,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "TimeZoneId",
+      "ORDINAL_POSITION": 11,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 100,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "COLUMN_NAME": "UpdatedAt",
+      "ORDINAL_POSITION": 12,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "CourseId",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "CourseVersionId",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "IsPublished",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "ModuleDescription",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 1000,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "ModuleId",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "ModuleTitle",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 200,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "COLUMN_NAME": "SequenceNumber",
+      "ORDINAL_POSITION": 8,
+      "DATA_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 10,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "CourseCode",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 40,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "CourseId",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "CourseLevel",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 30,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "CourseName",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 200,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "CreatedByUserId",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "CurrencyCode",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "char",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 3,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "DeletedAt",
+      "ORDINAL_POSITION": 8,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "Description",
+      "ORDINAL_POSITION": 9,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": -1,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "DurationUnit",
+      "ORDINAL_POSITION": 10,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "DurationValue",
+      "ORDINAL_POSITION": 11,
+      "DATA_TYPE": "int",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 10,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "IsPreviewEnabled",
+      "ORDINAL_POSITION": 12,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "ListPrice",
+      "ORDINAL_POSITION": 13,
+      "DATA_TYPE": "decimal",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 12,
+      "NUMERIC_SCALE": 2
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "ShortDescription",
+      "ORDINAL_POSITION": 14,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 1000,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "Status",
+      "ORDINAL_POSITION": 15,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "COLUMN_NAME": "UpdatedAt",
+      "ORDINAL_POSITION": 16,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "ChangeSummary",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 1000,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "CourseId",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "CourseVersionId",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "IsCurrent",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "PublishedAt",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "VersionNumber",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 10,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "COLUMN_NAME": "VersionTitle",
+      "ORDINAL_POSITION": 8,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 150,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "ActivatedAt",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "BatchId",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "CompletedAt",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "CourseId",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "CoursePrice",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "decimal",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 12,
+      "NUMERIC_SCALE": 2
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "CreatedByUserId",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "CurrencyCode",
+      "ORDINAL_POSITION": 8,
+      "DATA_TYPE": "char",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 3,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "DiscountAmount",
+      "ORDINAL_POSITION": 9,
+      "DATA_TYPE": "decimal",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 12,
+      "NUMERIC_SCALE": 2
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "EnrollmentId",
+      "ORDINAL_POSITION": 10,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "EnrollmentNumber",
+      "ORDINAL_POSITION": 11,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 40,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "EnrollmentSource",
+      "ORDINAL_POSITION": 12,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "EnrollmentStatus",
+      "ORDINAL_POSITION": 13,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 25,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "FinalAmount",
+      "ORDINAL_POSITION": 14,
+      "DATA_TYPE": "decimal",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 12,
+      "NUMERIC_SCALE": 2
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "StudentUserId",
+      "ORDINAL_POSITION": 15,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "COLUMN_NAME": "UpdatedAt",
+      "ORDINAL_POSITION": 16,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "COLUMN_NAME": "Description",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 500,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "COLUMN_NAME": "IsActive",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "COLUMN_NAME": "IsSystemRole",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "COLUMN_NAME": "RoleCode",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 40,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "COLUMN_NAME": "RoleId",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 10,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "COLUMN_NAME": "RoleName",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 100,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "AddressLine1",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 250,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "AddressLine2",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 250,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "ApprovalStatus",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "ApprovedAt",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "ApprovedByUserId",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "Branch",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 100,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "City",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 100,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "CollegeName",
+      "ORDINAL_POSITION": 8,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 200,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "Country",
+      "ORDINAL_POSITION": 9,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 100,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 10,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "DateOfBirth",
+      "ORDINAL_POSITION": 11,
+      "DATA_TYPE": "date",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "Degree",
+      "ORDINAL_POSITION": 12,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 100,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "Gender",
+      "ORDINAL_POSITION": 13,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 30,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "GitHubUrl",
+      "ORDINAL_POSITION": 14,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 500,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "GuardianCountryCode",
+      "ORDINAL_POSITION": 15,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 8,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "GuardianMobile",
+      "ORDINAL_POSITION": 16,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "GuardianName",
+      "ORDINAL_POSITION": 17,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 150,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "InterestedCourseId",
+      "ORDINAL_POSITION": 18,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "LinkedInUrl",
+      "ORDINAL_POSITION": 19,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 500,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "PassingYear",
+      "ORDINAL_POSITION": 20,
+      "DATA_TYPE": "smallint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 5,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "PostalCode",
+      "ORDINAL_POSITION": 21,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "RejectionReason",
+      "ORDINAL_POSITION": 22,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 500,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "ResumeObjectKey",
+      "ORDINAL_POSITION": 23,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 500,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "State",
+      "ORDINAL_POSITION": 24,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 100,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "StudentProfileId",
+      "ORDINAL_POSITION": 25,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "UpdatedAt",
+      "ORDINAL_POSITION": 26,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "COLUMN_NAME": "UserId",
+      "ORDINAL_POSITION": 27,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "COLUMN_NAME": "AssignedAt",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "COLUMN_NAME": "AssignedByUserId",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "COLUMN_NAME": "ExpiresAt",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "COLUMN_NAME": "RoleId",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 10,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "COLUMN_NAME": "UserId",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "COLUMN_NAME": "UserRoleId",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "AccountStatus",
+      "ORDINAL_POSITION": 1,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "CountryCode",
+      "ORDINAL_POSITION": 2,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 8,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "CreatedAt",
+      "ORDINAL_POSITION": 3,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "DeletedAt",
+      "ORDINAL_POSITION": 4,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "Email",
+      "ORDINAL_POSITION": 5,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 254,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "EmailVerified",
+      "ORDINAL_POSITION": 6,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "FailedLoginAttempts",
+      "ORDINAL_POSITION": 7,
+      "DATA_TYPE": "int",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 10,
+      "NUMERIC_SCALE": 0
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "FullName",
+      "ORDINAL_POSITION": 8,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 150,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "IsLocked",
+      "ORDINAL_POSITION": 9,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "LastLoginAt",
+      "ORDINAL_POSITION": 10,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "LockoutUntil",
+      "ORDINAL_POSITION": 11,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "MobileNumber",
+      "ORDINAL_POSITION": 12,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 20,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "MobileVerified",
+      "ORDINAL_POSITION": 13,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "NormalizedEmail",
+      "ORDINAL_POSITION": 14,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 254,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "NormalizedMobile",
+      "ORDINAL_POSITION": 15,
+      "DATA_TYPE": "varchar",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": 25,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "PasswordHash",
+      "ORDINAL_POSITION": 16,
+      "DATA_TYPE": "nvarchar",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": 500,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "PublicUserId",
+      "ORDINAL_POSITION": 17,
+      "DATA_TYPE": "uniqueidentifier",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "TwoFactorEnabled",
+      "ORDINAL_POSITION": 18,
+      "DATA_TYPE": "bit",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "UpdatedAt",
+      "ORDINAL_POSITION": 19,
+      "DATA_TYPE": "datetime2",
+      "IS_NULLABLE": "YES",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": null,
+      "NUMERIC_SCALE": null
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "COLUMN_NAME": "UserId",
+      "ORDINAL_POSITION": 20,
+      "DATA_TYPE": "bigint",
+      "IS_NULLABLE": "NO",
+      "CHARACTER_MAXIMUM_LENGTH": null,
+      "NUMERIC_PRECISION": 19,
+      "NUMERIC_SCALE": 0
+    }
+  ],
+  "constraints": [
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_Batches_CourseId_Courses",
+      "COLUMN_NAME": "CourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_Batches",
+      "COLUMN_NAME": "BatchId"
+    },
+    {
+      "TABLE_NAME": "NXA_Batches",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_Batches_BatchCode",
+      "COLUMN_NAME": "BatchCode"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_CourseModules_CourseId_Courses",
+      "COLUMN_NAME": "CourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_CourseModules_CourseVersionId_CourseVersions",
+      "COLUMN_NAME": "CourseVersionId"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_CourseModules",
+      "COLUMN_NAME": "ModuleId"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_CourseModules_Sequence",
+      "COLUMN_NAME": "CourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseModules",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_CourseModules_Sequence",
+      "COLUMN_NAME": "SequenceNumber"
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_Courses_CreatedByUserId_Users",
+      "COLUMN_NAME": "CreatedByUserId"
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_Courses",
+      "COLUMN_NAME": "CourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_Courses",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_Courses_CourseCode",
+      "COLUMN_NAME": "CourseCode"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_CourseVersions_CourseId_Courses",
+      "COLUMN_NAME": "CourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_CourseVersions",
+      "COLUMN_NAME": "CourseVersionId"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_CourseVersions_Course_Version",
+      "COLUMN_NAME": "CourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_CourseVersions",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_CourseVersions_Course_Version",
+      "COLUMN_NAME": "VersionNumber"
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_Enrollments_BatchId_Batches",
+      "COLUMN_NAME": "BatchId"
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_Enrollments_CourseId_Courses",
+      "COLUMN_NAME": "CourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_Enrollments_CreatedByUserId_Users",
+      "COLUMN_NAME": "CreatedByUserId"
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_Enrollments_StudentUserId_Users",
+      "COLUMN_NAME": "StudentUserId"
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_Enrollments",
+      "COLUMN_NAME": "EnrollmentId"
+    },
+    {
+      "TABLE_NAME": "NXA_Enrollments",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_Enrollments_EnrollmentNumber",
+      "COLUMN_NAME": "EnrollmentNumber"
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_Roles",
+      "COLUMN_NAME": "RoleId"
+    },
+    {
+      "TABLE_NAME": "NXA_Roles",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_Roles_RoleCode",
+      "COLUMN_NAME": "RoleCode"
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_StudentProfiles_ApprovedByUserId_Users",
+      "COLUMN_NAME": "ApprovedByUserId"
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_StudentProfiles_InterestedCourse",
+      "COLUMN_NAME": "InterestedCourseId"
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_StudentProfiles_UserId_Users",
+      "COLUMN_NAME": "UserId"
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_StudentProfiles",
+      "COLUMN_NAME": "StudentProfileId"
+    },
+    {
+      "TABLE_NAME": "NXA_StudentProfiles",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_StudentProfiles_User",
+      "COLUMN_NAME": "UserId"
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_UserRoles_AssignedByUserId_Users",
+      "COLUMN_NAME": "AssignedByUserId"
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_UserRoles_RoleId_Roles",
+      "COLUMN_NAME": "RoleId"
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "CONSTRAINT_TYPE": "FOREIGN KEY",
+      "CONSTRAINT_NAME": "FK_NXA_UserRoles_UserId_Users",
+      "COLUMN_NAME": "UserId"
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_UserRoles",
+      "COLUMN_NAME": "UserRoleId"
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_UserRoles_UserRole",
+      "COLUMN_NAME": "RoleId"
+    },
+    {
+      "TABLE_NAME": "NXA_UserRoles",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_UserRoles_UserRole",
+      "COLUMN_NAME": "UserId"
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "CONSTRAINT_TYPE": "PRIMARY KEY",
+      "CONSTRAINT_NAME": "PK_NXA_Users",
+      "COLUMN_NAME": "UserId"
+    },
+    {
+      "TABLE_NAME": "NXA_Users",
+      "CONSTRAINT_TYPE": "UNIQUE",
+      "CONSTRAINT_NAME": "UQ_NXA_Users_PublicUserId",
+      "COLUMN_NAME": "PublicUserId"
+    }
+  ],
+  "procedures": [
+    {
+      "ProcedureName": "USP_NXA_Activate_Enrollment",
+      "CreatedAt": "2026-11-19T15:24:09.567Z",
+      "ModifiedAt": "2026-11-19T15:24:09.567Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Admin_Approve_Student",
+      "CreatedAt": "2026-11-19T15:20:56.973Z",
+      "ModifiedAt": "2026-11-19T15:20:56.973Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Approve_Refund",
+      "CreatedAt": "2026-11-19T15:25:34.177Z",
+      "ModifiedAt": "2026-11-19T15:25:34.177Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Assign_Teacher",
+      "CreatedAt": "2026-11-19T15:24:14.163Z",
+      "ModifiedAt": "2026-11-19T15:24:14.163Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "CreatedAt": "2026-11-19T15:24:18.373Z",
+      "ModifiedAt": "2026-11-19T15:24:18.373Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "CreatedAt": "2026-11-19T15:24:23.680Z",
+      "ModifiedAt": "2026-11-19T15:24:23.680Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Payment_Order",
+      "CreatedAt": "2026-11-19T15:25:40.707Z",
+      "ModifiedAt": "2026-11-19T15:25:40.707Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Teacher",
+      "CreatedAt": "2026-11-19T15:21:04.693Z",
+      "ModifiedAt": "2026-11-19T15:21:04.693Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Enroll_Student",
+      "CreatedAt": "2026-11-19T15:24:27.570Z",
+      "ModifiedAt": "2026-11-19T15:24:27.570Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Generate_OTP",
+      "CreatedAt": "2026-11-19T15:21:08.687Z",
+      "ModifiedAt": "2026-11-19T15:21:08.687Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Available_Batches",
+      "CreatedAt": "2026-11-19T15:24:31.830Z",
+      "ModifiedAt": "2026-11-19T15:24:31.830Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Country_Codes",
+      "CreatedAt": "2026-11-20T19:01:01.643Z",
+      "ModifiedAt": "2026-11-20T19:01:04.277Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Course_Details",
+      "CreatedAt": "2026-11-19T15:24:36.090Z",
+      "ModifiedAt": "2026-11-19T15:24:36.090Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Payment_History",
+      "CreatedAt": "2026-11-19T15:25:44.593Z",
+      "ModifiedAt": "2026-11-19T15:25:44.593Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Pending_Students",
+      "CreatedAt": "2026-11-19T15:21:11.813Z",
+      "ModifiedAt": "2026-11-19T15:21:11.813Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Dashboard",
+      "CreatedAt": "2026-11-19T15:21:15.373Z",
+      "ModifiedAt": "2026-11-19T15:21:15.373Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Enrollments",
+      "CreatedAt": "2026-11-19T15:24:39.913Z",
+      "ModifiedAt": "2026-11-19T15:24:39.913Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Profile",
+      "CreatedAt": "2026-11-19T15:21:18.903Z",
+      "ModifiedAt": "2026-11-19T15:21:18.903Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Process_Payment_Webhook",
+      "CreatedAt": "2026-11-19T15:25:49.183Z",
+      "ModifiedAt": "2026-11-19T15:25:49.183Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "CreatedAt": "2026-11-19T15:25:55.397Z",
+      "ModifiedAt": "2026-11-19T15:25:55.397Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Refresh_Session",
+      "CreatedAt": "2026-11-19T15:21:22.467Z",
+      "ModifiedAt": "2026-11-19T15:21:22.467Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "CreatedAt": "2026-11-19T15:21:25.540Z",
+      "ModifiedAt": "2026-11-20T18:02:18.773Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Reset_Password",
+      "CreatedAt": "2026-11-19T15:21:28.397Z",
+      "ModifiedAt": "2026-11-19T15:21:28.397Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Revoke_Session",
+      "CreatedAt": "2026-11-19T15:21:31.290Z",
+      "ModifiedAt": "2026-11-19T15:21:31.290Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "CreatedAt": "2026-11-19T15:21:34.450Z",
+      "ModifiedAt": "2026-11-19T15:21:34.450Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Status",
+      "CreatedAt": "2026-11-19T15:21:37.580Z",
+      "ModifiedAt": "2026-11-19T15:21:37.580Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_User_Login",
+      "CreatedAt": "2026-11-19T15:21:40.417Z",
+      "ModifiedAt": "2026-11-19T15:21:40.417Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_OTP",
+      "CreatedAt": "2026-11-19T15:21:43.540Z",
+      "ModifiedAt": "2026-11-19T15:21:43.540Z"
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_Payment",
+      "CreatedAt": "2026-11-19T15:26:08.467Z",
+      "ModifiedAt": "2026-11-19T15:26:08.467Z"
+    }
+  ],
+  "procedureParameters": [
+    {
+      "ProcedureName": "fn_NXA_HasPermission",
+      "PARAMETER_NAME": "",
+      "ORDINAL_POSITION": 0,
+      "PARAMETER_MODE": "OUT",
+      "DATA_TYPE": "bit",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_HasPermission",
+      "PARAMETER_NAME": "@UserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_HasPermission",
+      "PARAMETER_NAME": "@PermissionCode",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "fn_NXA_IsEnrollmentEligible",
+      "PARAMETER_NAME": "",
+      "ORDINAL_POSITION": 0,
+      "PARAMETER_MODE": "OUT",
+      "DATA_TYPE": "bit",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsEnrollmentEligible",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsEnrollmentEligible",
+      "PARAMETER_NAME": "@CourseId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsStudentApproved",
+      "PARAMETER_NAME": "",
+      "ORDINAL_POSITION": 0,
+      "PARAMETER_MODE": "OUT",
+      "DATA_TYPE": "bit",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsStudentApproved",
+      "PARAMETER_NAME": "@UserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsStudentVerified",
+      "PARAMETER_NAME": "",
+      "ORDINAL_POSITION": 0,
+      "PARAMETER_MODE": "OUT",
+      "DATA_TYPE": "bit",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsStudentVerified",
+      "PARAMETER_NAME": "@UserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsTeacherAssignedToBatch",
+      "PARAMETER_NAME": "",
+      "ORDINAL_POSITION": 0,
+      "PARAMETER_MODE": "OUT",
+      "DATA_TYPE": "bit",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsTeacherAssignedToBatch",
+      "PARAMETER_NAME": "@TeacherUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "fn_NXA_IsTeacherAssignedToBatch",
+      "PARAMETER_NAME": "@BatchId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Activate_Enrollment",
+      "PARAMETER_NAME": "@EnrollmentId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Admin_Approve_Student",
+      "PARAMETER_NAME": "@AdminUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Admin_Approve_Student",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Admin_Approve_Student",
+      "PARAMETER_NAME": "@Action",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 10
+    },
+    {
+      "ProcedureName": "USP_NXA_Admin_Approve_Student",
+      "PARAMETER_NAME": "@RejectionReason",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Approve_Refund",
+      "PARAMETER_NAME": "@RefundId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Approve_Refund",
+      "PARAMETER_NAME": "@SuperAdminUserId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Assign_Teacher",
+      "PARAMETER_NAME": "@AdminUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Assign_Teacher",
+      "PARAMETER_NAME": "@TeacherUserId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Assign_Teacher",
+      "PARAMETER_NAME": "@CourseId",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Assign_Teacher",
+      "PARAMETER_NAME": "@BatchId",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@AdminUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@CourseId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@BatchCode",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 40
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@BatchName",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 150
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@Capacity",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@StartDate",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "date",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@EndDate",
+      "ORDINAL_POSITION": 7,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "date",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@ScheduleDescription",
+      "ORDINAL_POSITION": 8,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Batch",
+      "PARAMETER_NAME": "@TimeZoneId",
+      "ORDINAL_POSITION": 9,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@AdminUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@CourseCode",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 40
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@CourseName",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 200
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@CourseLevel",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 30
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@Description",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": -1
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@ShortDescription",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 1000
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@DurationValue",
+      "ORDINAL_POSITION": 7,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@DurationUnit",
+      "ORDINAL_POSITION": 8,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@ListPrice",
+      "ORDINAL_POSITION": 9,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "decimal",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Course",
+      "PARAMETER_NAME": "@CurrencyCode",
+      "ORDINAL_POSITION": 10,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "char",
+      "CHARACTER_MAXIMUM_LENGTH": 3
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Payment_Order",
+      "PARAMETER_NAME": "@EnrollmentId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Payment_Order",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Payment_Order",
+      "PARAMETER_NAME": "@PaymentGateway",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 30
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Teacher",
+      "PARAMETER_NAME": "@FullName",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 150
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Teacher",
+      "PARAMETER_NAME": "@Email",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 254
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Teacher",
+      "PARAMETER_NAME": "@CountryCode",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 8
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Teacher",
+      "PARAMETER_NAME": "@MobileNumber",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Teacher",
+      "PARAMETER_NAME": "@PasswordHash",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 1000
+    },
+    {
+      "ProcedureName": "USP_NXA_Create_Teacher",
+      "PARAMETER_NAME": "@CreatedByUserId",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Enroll_Student",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Enroll_Student",
+      "PARAMETER_NAME": "@CourseId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Enroll_Student",
+      "PARAMETER_NAME": "@BatchId",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Enroll_Student",
+      "PARAMETER_NAME": "@CreatedByUserId",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Generate_OTP",
+      "PARAMETER_NAME": "@UserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Generate_OTP",
+      "PARAMETER_NAME": "@OtpPurpose",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 40
+    },
+    {
+      "ProcedureName": "USP_NXA_Generate_OTP",
+      "PARAMETER_NAME": "@OtpCode",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "INOUT",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 6
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Available_Batches",
+      "PARAMETER_NAME": "@CourseId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Available_Batches",
+      "PARAMETER_NAME": "@PageNumber",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Available_Batches",
+      "PARAMETER_NAME": "@PageSize",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Course_Details",
+      "PARAMETER_NAME": "@CourseId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Payment_History",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Payment_History",
+      "PARAMETER_NAME": "@PaymentStatus",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Payment_History",
+      "PARAMETER_NAME": "@FromDate",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "date",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Payment_History",
+      "PARAMETER_NAME": "@ToDate",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "date",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Payment_History",
+      "PARAMETER_NAME": "@PageNumber",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Payment_History",
+      "PARAMETER_NAME": "@PageSize",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Pending_Students",
+      "PARAMETER_NAME": "@AdminUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Pending_Students",
+      "PARAMETER_NAME": "@PageNumber",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Pending_Students",
+      "PARAMETER_NAME": "@PageSize",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Pending_Students",
+      "PARAMETER_NAME": "@Search",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 150
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Dashboard",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Enrollments",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Enrollments",
+      "PARAMETER_NAME": "@PageNumber",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Enrollments",
+      "PARAMETER_NAME": "@PageSize",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Get_Student_Profile",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Process_Payment_Webhook",
+      "PARAMETER_NAME": "@GatewayName",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 30
+    },
+    {
+      "ProcedureName": "USP_NXA_Process_Payment_Webhook",
+      "PARAMETER_NAME": "@GatewayEventId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 150
+    },
+    {
+      "ProcedureName": "USP_NXA_Process_Payment_Webhook",
+      "PARAMETER_NAME": "@EventType",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Process_Payment_Webhook",
+      "PARAMETER_NAME": "@Payload",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": -1
+    },
+    {
+      "ProcedureName": "USP_NXA_Process_Payment_Webhook",
+      "PARAMETER_NAME": "@SignatureValid",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bit",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "PARAMETER_NAME": "@EnrollmentId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "PARAMETER_NAME": "@Amount",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "decimal",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "PARAMETER_NAME": "@PaymentMode",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 30
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "PARAMETER_NAME": "@ReferenceNumber",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "PARAMETER_NAME": "@ProofObjectKey",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 700
+    },
+    {
+      "ProcedureName": "USP_NXA_Record_Manual_Payment",
+      "PARAMETER_NAME": "@EnteredByUserId",
+      "ORDINAL_POSITION": 7,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Refresh_Session",
+      "PARAMETER_NAME": "@CurrentRefreshTokenHash",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varbinary",
+      "CHARACTER_MAXIMUM_LENGTH": 64
+    },
+    {
+      "ProcedureName": "USP_NXA_Refresh_Session",
+      "PARAMETER_NAME": "@NewRefreshTokenHash",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varbinary",
+      "CHARACTER_MAXIMUM_LENGTH": 64
+    },
+    {
+      "ProcedureName": "USP_NXA_Refresh_Session",
+      "PARAMETER_NAME": "@SessionMinutes",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@FullName",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 150
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@Email",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 254
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@CountryCode",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 8
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@MobileNumber",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@PasswordHash",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@CollegeName",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 200
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@Degree",
+      "ORDINAL_POSITION": 7,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@Branch",
+      "ORDINAL_POSITION": 8,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@PassingYear",
+      "ORDINAL_POSITION": 9,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "smallint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@InterestedCourseId",
+      "ORDINAL_POSITION": 10,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@DateOfBirth",
+      "ORDINAL_POSITION": 11,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "date",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@Gender",
+      "ORDINAL_POSITION": 12,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 30
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@AddressLine1",
+      "ORDINAL_POSITION": 13,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 250
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@AddressLine2",
+      "ORDINAL_POSITION": 14,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 250
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@City",
+      "ORDINAL_POSITION": 15,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@State",
+      "ORDINAL_POSITION": 16,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@Country",
+      "ORDINAL_POSITION": 17,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@PostalCode",
+      "ORDINAL_POSITION": 18,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@ResumeObjectKey",
+      "ORDINAL_POSITION": 19,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@LinkedInUrl",
+      "ORDINAL_POSITION": 20,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@GitHubUrl",
+      "ORDINAL_POSITION": 21,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@GuardianName",
+      "ORDINAL_POSITION": 22,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 150
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@GuardianCountryCode",
+      "ORDINAL_POSITION": 23,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 8
+    },
+    {
+      "ProcedureName": "USP_NXA_Register_Student",
+      "PARAMETER_NAME": "@GuardianMobile",
+      "ORDINAL_POSITION": 24,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_Reset_Password",
+      "PARAMETER_NAME": "@UserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Reset_Password",
+      "PARAMETER_NAME": "@OtpRecordId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Reset_Password",
+      "PARAMETER_NAME": "@OtpHash",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varbinary",
+      "CHARACTER_MAXIMUM_LENGTH": 64
+    },
+    {
+      "ProcedureName": "USP_NXA_Reset_Password",
+      "PARAMETER_NAME": "@NewPasswordHash",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 1000
+    },
+    {
+      "ProcedureName": "USP_NXA_Revoke_Session",
+      "PARAMETER_NAME": "@RefreshTokenHash",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varbinary",
+      "CHARACTER_MAXIMUM_LENGTH": 64
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@CollegeName",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 200
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@Degree",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@Branch",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@PassingYear",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "smallint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@City",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@State",
+      "ORDINAL_POSITION": 7,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@Country",
+      "ORDINAL_POSITION": 8,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 100
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@AddressLine1",
+      "ORDINAL_POSITION": 9,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 250
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@PostalCode",
+      "ORDINAL_POSITION": 10,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@LinkedInUrl",
+      "ORDINAL_POSITION": 11,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Profile",
+      "PARAMETER_NAME": "@GitHubUrl",
+      "ORDINAL_POSITION": 12,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Status",
+      "PARAMETER_NAME": "@AdminUserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Status",
+      "PARAMETER_NAME": "@StudentUserId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Update_Student_Status",
+      "PARAMETER_NAME": "@NewStatus",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 20
+    },
+    {
+      "ProcedureName": "USP_NXA_User_Login",
+      "PARAMETER_NAME": "@UserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_User_Login",
+      "PARAMETER_NAME": "@RefreshTokenHash",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varbinary",
+      "CHARACTER_MAXIMUM_LENGTH": 64
+    },
+    {
+      "ProcedureName": "USP_NXA_User_Login",
+      "PARAMETER_NAME": "@SessionMinutes",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "int",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_User_Login",
+      "PARAMETER_NAME": "@IpAddress",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 45
+    },
+    {
+      "ProcedureName": "USP_NXA_User_Login",
+      "PARAMETER_NAME": "@DeviceInfo",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 300
+    },
+    {
+      "ProcedureName": "USP_NXA_User_Login",
+      "PARAMETER_NAME": "@UserAgent",
+      "ORDINAL_POSITION": 6,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": 500
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_OTP",
+      "PARAMETER_NAME": "@UserId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_OTP",
+      "PARAMETER_NAME": "@OtpRecordId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_OTP",
+      "PARAMETER_NAME": "@OtpPurpose",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 40
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_OTP",
+      "PARAMETER_NAME": "@Otp",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 6
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_Payment",
+      "PARAMETER_NAME": "@PaymentOrderId",
+      "ORDINAL_POSITION": 1,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "bigint",
+      "CHARACTER_MAXIMUM_LENGTH": null
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_Payment",
+      "PARAMETER_NAME": "@GatewayOrderId",
+      "ORDINAL_POSITION": 2,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 120
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_Payment",
+      "PARAMETER_NAME": "@GatewayPaymentId",
+      "ORDINAL_POSITION": 3,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 120
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_Payment",
+      "PARAMETER_NAME": "@PaymentMethod",
+      "ORDINAL_POSITION": 4,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "varchar",
+      "CHARACTER_MAXIMUM_LENGTH": 30
+    },
+    {
+      "ProcedureName": "USP_NXA_Verify_Payment",
+      "PARAMETER_NAME": "@GatewayPayload",
+      "ORDINAL_POSITION": 5,
+      "PARAMETER_MODE": "IN",
+      "DATA_TYPE": "nvarchar",
+      "CHARACTER_MAXIMUM_LENGTH": -1
+    }
+  ]
+}

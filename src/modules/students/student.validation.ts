@@ -103,3 +103,30 @@ export const studentApproveBodySchema = z.object({
 });
 
 export type StudentApproveBody = z.infer<typeof studentApproveBodySchema>;
+
+/**
+ * `PUT /students/me` body - student updates their own profile.
+ */
+export const studentProfileUpdateBodySchema = z.object({
+  name: z.string().trim().min(2).max(150).optional(),
+  mobile: z.string().trim().min(6).max(20).optional(),
+  avatarUrl: z.string().trim().url().max(500).optional(),
+  collegeName: z.string().trim().max(200).optional(),
+  degreeBranch: z.string().trim().max(100).optional(),
+  passingYear: z
+    .string()
+    .trim()
+    .regex(/^\d{4}$/, "Must be a 4-digit year")
+    .optional(),
+  dateOfBirth: z.string().trim().optional(),
+  gender: z.enum(["male", "female", "other"]).optional(),
+  fullAddress: z.string().trim().max(500).optional(),
+  guardianContact: z.string().trim().max(250).optional(),
+  linkedInUrl: z.string().trim().max(500).optional(),
+  githubUrl: z.string().trim().max(500).optional(),
+  resumeUrl: z.string().trim().max(500).optional(),
+  resumeFileName: z.string().trim().max(255).optional(),
+  resumeFileSize: z.string().trim().max(50).optional(),
+});
+
+export type StudentProfileUpdateBody = z.infer<typeof studentProfileUpdateBodySchema>;

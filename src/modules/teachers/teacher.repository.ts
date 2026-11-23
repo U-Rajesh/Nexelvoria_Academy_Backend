@@ -1,18 +1,28 @@
 import type { PaginatedResult, PaginationQuery } from "../../contracts/api.contract";
 import type { EntityId } from "../../contracts/identifier.contract";
 import type { UserStatus } from "../../contracts/user.contract";
+import type { Course } from "../courses/course.types";
 import type {
+  AssignmentRecord,
+  AssignmentSubmissionRecord,
+  AttendanceItem,
+  BatchStudentInfo,
+  ClassSessionRecord,
   CreateTeacherInput,
+  LearningMaterialRecord,
+  LessonDoubtRecord,
+  OnlineTestRecord,
   Teacher,
   TeacherAllocation,
   TeacherFilter,
+  TestAttemptRecord,
   UpdateTeacherInput,
 } from "./teacher.types";
 
 /**
  * The `teachers` repository PORT. Interface only - no SQL, no driver.
  *
- * Maps to docs/api-contracts.md section 6.
+ * Maps to docs/api-contracts.md section 6 and Batch 3 LMS operations.
  */
 export interface TeacherRepository {
   findById(id: EntityId): Promise<Teacher | null>;
@@ -45,19 +55,74 @@ export interface TeacherRepository {
 
   /**
    * THE teacher authorization primitive.
-   *
-   * Step 3 identified this as the most important rule on the teacher
-   * surface: a teacher may only read or mutate data for batches allocated
-   * to them. Every teacher-scoped endpoint - attendance, assignments,
-   * assessments, materials, rosters - must consult this, and must pass
-   * the teacher id from the SESSION, never from the request.
-   *
-   * It is a repository operation rather than a service calculation so the
-   * check can be a single indexed lookup instead of loading a teacher and
-   * scanning an array.
+   * A teacher may only read or mutate data for batches allocated to them.
    */
   isAllocatedToBatch(teacherId: EntityId, batchId: EntityId): Promise<boolean>;
 
   /** Teachers allocated to a batch. Backs batch detail views. */
   findByBatch(batchId: EntityId): Promise<Teacher[]>;
+
+  // --- Batch 3 Learning Management & Teacher Portals ----------------------
+
+  findAssignedCourses(teacherId: EntityId): Promise<Course[]>;
+
+  findAssignedBatches(teacherId: EntityId): Promise<Array<{ id: string; courseId: string; batchCode: string; batchName: string; status: string; scheduleDescription?: string }>>;
+
+  findBatchStudents(teacherId: EntityId, batchId: EntityId): Promise<BatchStudentInfo[]>;
+
+  findAllAuthorizedStudents(teacherId: EntityId): Promise<BatchStudentInfo[]>;
+
+  recordAttendanceSession(
+    teacherId: EntityId,
+    session: {
+      batchId: string;
+      courseId?: string | undefined;
+      sessionTitle: string;
+      startsAt?: string | undefined;
+      endsAt?: string | undefined;
+    },
+    records: Array<{ studentUserId: string; status: "present" | "absent" | "late" | "excused"; remarks?: string | undefined }>,
+  ): Promise<ClassSessionRecord>;
+
+  findAttendanceHistory(teacherId: EntityId, batchId?: EntityId): Promise<Array<{ session: ClassSessionRecord; records: AttendanceItem[] }>>;
+
+  findStudentAttendance(studentUserId: EntityId): Promise<AttendanceItem[]>;
+
+  findAssignments(teacherId?: EntityId, batchId?: EntityId, courseId?: EntityId): Promise<AssignmentRecord[]>;
+
+  createAssignment(teacherId: EntityId, assignment: Partial<AssignmentRecord>): Promise<AssignmentRecord>;
+
+  submitAssignment(submission: Partial<AssignmentSubmissionRecord>): Promise<AssignmentSubmissionRecord>;
+
+  evaluateSubmission(
+    submissionId: EntityId,
+    evaluatorUserId: EntityId,
+    marks: number,
+    feedback?: string,
+  ): Promise<AssignmentSubmissionRecord>;
+
+  findMaterials(lessonId: EntityId): Promise<LearningMaterialRecord[]>;
+
+  createMaterial(material: Partial<LearningMaterialRecord>): Promise<LearningMaterialRecord>;
+
+  deleteMaterial(materialId: EntityId): Promise<boolean>;
+
+  findDoubts(courseId?: EntityId, lessonId?: EntityId): Promise<LessonDoubtRecord[]>;
+
+  createDoubt(doubt: Partial<LessonDoubtRecord>): Promise<LessonDoubtRecord>;
+
+  replyDoubt(doubtId: EntityId, replyText: string): Promise<LessonDoubtRecord>;
+
+  recordLessonProgress(
+    studentUserId: EntityId,
+    lessonId: EntityId,
+    isCompleted: boolean,
+    progressPercent: number,
+  ): Promise<{ isCompleted: boolean; progressPercent: number }>;
+
+  findTests(teacherId?: EntityId, batchId?: EntityId, courseId?: EntityId): Promise<OnlineTestRecord[]>;
+
+  createTest(test: Partial<OnlineTestRecord>): Promise<OnlineTestRecord>;
+
+  findTestAttempts(testId?: EntityId, studentUserId?: EntityId): Promise<TestAttemptRecord[]>;
 }

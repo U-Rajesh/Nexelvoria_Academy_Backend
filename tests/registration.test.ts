@@ -5,11 +5,16 @@ import type { CredentialRepository } from "../src/modules/auth/credential.reposi
 import { createLoginService } from "../src/modules/auth/login.service";
 import { verifyPassword } from "../src/modules/auth/password.service";
 import {
+  RegistrationRejectedError,
+  type StudentRegistrationRepository,
+} from "../src/modules/auth/registration.repository";
+import {
   createRegistrationService,
   type RegistrationResult,
   type RegistrationService,
 } from "../src/modules/auth/registration.service";
 import type { StudentRepository } from "../src/modules/students/student.repository";
+import { DuplicateRecordError } from "../src/repositories/repository.errors";
 import type { UserRepository } from "../src/modules/users/user.repository";
 import { describeError } from "../src/utils/redact";
 import { createTestHarness, type TestHarness } from "./fakes";
@@ -907,5 +912,477 @@ describe("registration service", () => {
         assert.equal((await verifyPassword(credential.passwordHash, PASSWORD)).valid, true);
       });
     });
+  });
+});
+
+/**
+ * The ATOMIC registration path (Step 6K, Stage 2).
+ *
+ * Exercised over the in-memory `StudentRegistrationRepository` fake, which
+ * stands in for a transactional datastore. No SQL adapter exists yet and no
+ * stored procedure is executed here.
+ *
+ * The sequential path above is untouched and still the default - the suite
+ * that precedes this block is the regression evidence for that, since every
+ * one of its tests builds the service WITHOUT a `registration` dependency.
+ */
+describe("registration service - atomic datastore path", () => {
+  let h: TestHarness;
+  let service: RegistrationService;
+
+  beforeEach(() => {
+    h = createTestHarness();
+    service = createRegistrationService({
+      users: h.users,
+      credentials: h.credentials,
+      students: h.students,
+      // The one line that selects the atomic path.
+      registration: h.studentRegistration,
+    });
+  });
+
+  /** The same service, with the atomic port swapped for a stub. */
+  const serviceWithPort = (
+    overrides: Partial<StudentRegistrationRepository>,
+  ): RegistrationService =>
+    createRegistrationService({
+      users: h.users,
+      credentials: h.credentials,
+      students: h.students,
+      registration: withOverrides<StudentRegistrationRepository>(
+        h.studentRegistration,
+        overrides,
+      ),
+    });
+
+  const expectFailure = (
+    result: RegistrationResult,
+  ): Extract<RegistrationResult, { outcome: "failure" }> => {
+    assert.equal(result.outcome, "failure", `expected failure, got ${JSON.stringify(result)}`);
+    if (result.outcome !== "failure") assert.fail("expected a failure");
+    return result;
+  };
+
+  const expectSuccess = (
+    result: RegistrationResult,
+  ): Extract<RegistrationResult, { outcome: "success" }> => {
+    assert.equal(result.outcome, "success", `expected success, got ${JSON.stringify(result)}`);
+    if (result.outcome !== "success") assert.fail("expected success");
+    return result;
+  };
+
+  describe("one write, not three", () => {
+    it("registers through the atomic port alone", async () => {
+      expectSuccess(await service.register(validInput()));
+
+      assert.equal(h.studentRegistration.count, 1, "the atomic port holds the registration");
+    });
+
+    it("writes NOTHING through the three sequential repositories", async () => {
+      // The clearest statement of what Route A buys: identity, credential
+      // and profile are one unit inside the datastore, so none of the three
+      // fine-grained ports is touched.
+      expectSuccess(await service.register(validInput()));
+
+      assert.equal(h.users.count, 0, "users.create must not be called");
+      assert.equal(h.credentials.count, 0, "credentials.create must not be called");
+      assert.equal(h.students.count, 0, "students.createForUser must not be called");
+    });
+
+    it("performs no fast-path uniqueness pre-checks", async () => {
+      // The datastore checks uniqueness inside its own transaction, under
+      // locks. Reading first would add two round trips and a staleness
+      // window, so the atomic path must not do it - these stubs fail the
+      // test loudly if it does.
+      const forbidden = withOverrides<UserRepository>(h.users, {
+        existsByEmail: async () => {
+          assert.fail("existsByEmail must not be called on the atomic path");
+        },
+        existsByMobile: async () => {
+          assert.fail("existsByMobile must not be called on the atomic path");
+        },
+      });
+
+      const atomic = createRegistrationService({
+        users: forbidden,
+        credentials: h.credentials,
+        students: h.students,
+        registration: h.studentRegistration,
+      });
+
+      expectSuccess(await atomic.register(validInput()));
+    });
+
+    it("calls the atomic port exactly once per registration", async () => {
+      let calls = 0;
+
+      const counting = serviceWithPort({
+        register: async (input) => {
+          calls += 1;
+          return h.studentRegistration.register(input);
+        },
+      });
+
+      expectSuccess(await counting.register(validInput()));
+
+      assert.equal(calls, 1);
+    });
+  });
+
+  describe("the public identifier", () => {
+    it("returns userId as tempStudentId, never studentProfileId", async () => {
+      // THE CONTRACT THE FRONTEND AND THREE DOWNSTREAM FLOWS DEPEND ON.
+      //
+      // `RegisterPage` navigates to `/verify-otp?studentId=${tempStudentId}`,
+      // the email OTP challenge is keyed by this value, login resolves a
+      // pending profile by it, and admin approval posts it back. The
+      // datastore mints a SECOND id for the profile row; it must not leak.
+      const { data } = expectSuccess(await service.register(validInput()));
+
+      const stored = h.studentRegistration.inspect(data.tempStudentId);
+
+      assert.ok(stored, "tempStudentId must address the stored registration");
+      assert.equal(data.tempStudentId, stored.id);
+      assert.notEqual(
+        data.tempStudentId,
+        stored.studentProfileId,
+        "the internal profile id must never be returned as the public identifier",
+      );
+    });
+
+    it("keeps the response shape the frontend already consumes", async () => {
+      const { data } = expectSuccess(await service.register(validInput()));
+
+      assert.deepEqual(Object.keys(data).sort(), ["email", "mobile", "tempStudentId"]);
+      assert.equal(data.email, "ananya@test.local");
+      assert.equal(data.mobile, "9876543210");
+    });
+
+    it("does not expose the profile id anywhere in the result", async () => {
+      const { data } = expectSuccess(await service.register(validInput()));
+      const stored = h.studentRegistration.inspect(data.tempStudentId);
+
+      assert.ok(stored);
+      assert.ok(
+        !JSON.stringify(data).includes(stored.studentProfileId),
+        "the profile id must appear nowhere in the response",
+      );
+    });
+  });
+
+  describe("password hashing stays in the application", () => {
+    it("hands the port a verifiable argon2id hash, never the password", async () => {
+      const { data } = expectSuccess(await service.register(validInput()));
+      const stored = h.studentRegistration.inspect(data.tempStudentId);
+
+      assert.ok(stored);
+      assert.ok(stored.passwordHash.startsWith("$argon2id$"));
+      assert.notEqual(stored.passwordHash, PASSWORD);
+      assert.equal((await verifyPassword(stored.passwordHash, PASSWORD)).valid, true);
+    });
+
+    it("hashes once: the port receives exactly one hash, and stores it unchanged", async () => {
+      const received: string[] = [];
+
+      const capturing = serviceWithPort({
+        register: async (input) => {
+          received.push(input.passwordHash);
+          return h.studentRegistration.register(input);
+        },
+      });
+
+      const { data } = expectSuccess(await capturing.register(validInput()));
+      const stored = h.studentRegistration.inspect(data.tempStudentId);
+
+      assert.equal(received.length, 1, "exactly one hash crossed the boundary");
+      assert.ok(stored);
+      assert.equal(
+        stored.passwordHash,
+        received[0],
+        "the datastore must store the hash opaquely and never rehash it",
+      );
+    });
+
+    it("maps a hashing failure to a password validation issue", async () => {
+      const failure = expectFailure(await service.register(validInput({ password: "short" })));
+
+      // Caught by the schema before hashing, which is the point: the policy
+      // is enforced twice and never reaches the datastore either way.
+      assert.equal(failure.reason, "validation_failed");
+    });
+  });
+
+  describe("the admissions profile reaches the port", () => {
+    it("passes the whitelisted profile through", async () => {
+      const { data } = expectSuccess(await service.register(validInput()));
+      const stored = h.studentRegistration.inspect(data.tempStudentId);
+
+      assert.ok(stored);
+      assert.equal(stored.profile.collegeName, "Nexelvoria Institute of Technology");
+      assert.equal(stored.profile.degreeBranch, "B.Tech CSE");
+      assert.equal(stored.profile.passingYear, "2026");
+      assert.equal(stored.profile.courseInterestedIn, "Java Full Stack");
+      assert.equal(stored.profile.gender, "female");
+      assert.equal(stored.profile.guardianContact, "9876500000");
+    });
+
+    it("drops fields the whitelist does not name", async () => {
+      const { data } = expectSuccess(await service.register(validInput()));
+      const stored = h.studentRegistration.inspect(data.tempStudentId);
+
+      assert.ok(stored);
+
+      const profile = stored.profile as Record<string, unknown>;
+      assert.equal(profile["password"], undefined);
+      assert.equal(profile["confirmPassword"], undefined);
+      assert.equal(profile["termsAccepted"], undefined);
+      assert.equal(profile["role"], undefined);
+      assert.equal(profile["status"], undefined);
+    });
+
+    it("omits an untouched optional field rather than storing an empty string", async () => {
+      const { data } = expectSuccess(
+        await service.register(validInput({ linkedInUrl: "", githubUrl: "" })),
+      );
+      const stored = h.studentRegistration.inspect(data.tempStudentId);
+
+      assert.ok(stored);
+      assert.equal(stored.profile.linkedInUrl, undefined);
+      assert.equal(stored.profile.githubUrl, undefined);
+    });
+  });
+
+  describe("duplicate mapping is preserved", () => {
+    it("maps a duplicate email to email_taken", async () => {
+      expectSuccess(await service.register(validInput()));
+
+      const failure = expectFailure(
+        await service.register(validInput({ mobile: "9876500001" })),
+      );
+
+      assert.equal(failure.reason, "email_taken");
+      assert.equal(h.studentRegistration.count, 1, "no second registration");
+    });
+
+    it("maps a duplicate mobile to mobile_taken", async () => {
+      expectSuccess(await service.register(validInput()));
+
+      const failure = expectFailure(
+        await service.register(validInput({ email: "other@test.local" })),
+      );
+
+      assert.equal(failure.reason, "mobile_taken");
+    });
+
+    it("maps a duplicate email to email_taken regardless of case", async () => {
+      expectSuccess(await service.register(validInput()));
+
+      const failure = expectFailure(
+        await service.register(
+          validInput({ email: "ANANYA@TEST.LOCAL", mobile: "9876500001" }),
+        ),
+      );
+
+      assert.equal(failure.reason, "email_taken");
+    });
+
+    it("maps an UNNAMED conflict to identifier_taken, not to email_taken", async () => {
+      // A datastore may report only that SOME unique constraint failed. The
+      // port documents that as field "record". Reporting `email_taken` there
+      // would tell a student their email is registered when it may have been
+      // their mobile, sending them to the wrong recovery flow.
+      const ambiguous = serviceWithPort({
+        register: async () => {
+          throw new DuplicateRecordError("user", "record", "unknown");
+        },
+      });
+
+      const failure = expectFailure(await ambiguous.register(validInput()));
+
+      assert.equal(failure.reason, "identifier_taken");
+    });
+
+    it("exactly one of two concurrent identical registrations succeeds", async () => {
+      const results = await Promise.all([
+        service.register(validInput()),
+        service.register(validInput()),
+      ]);
+
+      assert.equal(results.filter((r) => r.outcome === "success").length, 1);
+      assert.equal(h.studentRegistration.count, 1);
+
+      const loser = results.find((r) => r.outcome === "failure");
+
+      if (loser?.outcome === "failure") {
+        assert.ok(
+          loser.reason === "email_taken" || loser.reason === "mobile_taken",
+          `the loser must report a conflict, got ${loser.reason}`,
+        );
+      }
+    });
+  });
+
+  describe("a datastore validation refusal becomes a field-level 422", () => {
+    const rejected = (
+      issues: { field: string; message: string }[],
+      reasonCode = "INVALID_EMAIL",
+      referenceId = "db-reference-0001",
+    ): Partial<StudentRegistrationRepository> => ({
+      register: async () => {
+        throw new RegistrationRejectedError(issues, reasonCode, referenceId);
+      },
+    });
+
+    it("maps RegistrationRejectedError to validation_failed with its issues", async () => {
+      const service2 = serviceWithPort(
+        rejected([{ field: "email", message: "Invalid email address." }]),
+      );
+
+      const failure = expectFailure(await service2.register(validInput()));
+
+      assert.equal(failure.reason, "validation_failed");
+      assert.deepEqual(failure.issues, [{ field: "email", message: "Invalid email address." }]);
+    });
+
+    it("leaks no datastore detail: no reason code, no reference id", async () => {
+      const service2 = serviceWithPort(
+        rejected([{ field: "mobile", message: "Invalid mobile number." }]),
+      );
+
+      const failure = expectFailure(await service2.register(validInput()));
+      const serialised = JSON.stringify(failure);
+
+      assert.ok(!serialised.includes("INVALID_EMAIL"), "the reason code stays in the log");
+      assert.ok(
+        !serialised.includes("db-reference-0001"),
+        "the datastore correlation id stays in the log",
+      );
+      assert.ok(
+        !/procedure|sql|mssql|dbo\.|USP_/i.test(serialised),
+        `no datastore vocabulary may reach the client: ${serialised}`,
+      );
+    });
+
+    it("writes nothing when the datastore refuses", async () => {
+      const service2 = serviceWithPort(
+        rejected([{ field: "email", message: "Invalid email address." }]),
+      );
+
+      expectFailure(await service2.register(validInput()));
+
+      assert.equal(h.studentRegistration.count, 0);
+      assert.equal(h.users.count, 0);
+      assert.equal(h.credentials.count, 0);
+      assert.equal(h.students.count, 0);
+    });
+  });
+
+  describe("an unavailable datastore", () => {
+    it("reports registration_unavailable, never a partial state", async () => {
+      const broken = serviceWithPort({
+        register: async () => {
+          throw new Error("connection reset");
+        },
+      });
+
+      const failure = expectFailure(await broken.register(validInput()));
+
+      // `incomplete` and `profile_incomplete` are UNREACHABLE on this path:
+      // an atomic write either committed or rolled back, so there is no
+      // partial state to report and nothing for an operator to repair.
+      assert.equal(failure.reason, "registration_unavailable");
+      assert.notEqual(failure.reason, "incomplete");
+      assert.notEqual(failure.reason, "profile_incomplete");
+    });
+
+    it("leaks no driver or connection detail", async () => {
+      const broken = serviceWithPort({
+        register: async () => {
+          throw new Error("Failed to connect to 10.0.0.1:1433 - login failed for user sa");
+        },
+      });
+
+      const failure = expectFailure(await broken.register(validInput()));
+      const serialised = JSON.stringify(failure);
+
+      assert.ok(!serialised.includes("10.0.0.1"), "no host may reach the client");
+      assert.ok(!/login failed|sa\b|1433/i.test(serialised), `leaked: ${serialised}`);
+    });
+
+    it("stores nothing after a failure, so the identifiers stay free", async () => {
+      const broken = serviceWithPort({
+        register: async () => {
+          throw new Error("connection reset");
+        },
+      });
+
+      expectFailure(await broken.register(validInput()));
+      assert.equal(h.studentRegistration.count, 0);
+
+      // The same payload now succeeds against the working port.
+      expectSuccess(await service.register(validInput()));
+      assert.equal(h.studentRegistration.count, 1);
+    });
+  });
+
+  describe("no sensitive information leaks", () => {
+    it("the success payload carries no credential material", async () => {
+      const result = expectSuccess(await service.register(validInput()));
+      const serialised = JSON.stringify(result);
+
+      assert.ok(
+        !/password|argon2|hash|token|secret/i.test(serialised),
+        `the registration result must carry no credential material: ${serialised}`,
+      );
+      assert.ok(!serialised.includes(PASSWORD));
+    });
+  });
+});
+
+/**
+ * The sequential path is still the default, and still behaves exactly as it
+ * did before Stage 2.
+ *
+ * The large suite at the top of this file is the real regression evidence -
+ * every test in it omits `registration`. These two pin the SELECTION rule
+ * itself, so that a future change to the branch cannot silently move the
+ * default.
+ */
+describe("registration service - path selection", () => {
+  let h: TestHarness;
+
+  beforeEach(() => {
+    h = createTestHarness();
+  });
+
+  it("omitting the atomic port keeps the three sequential writes", async () => {
+    const sequential = createRegistrationService({
+      users: h.users,
+      credentials: h.credentials,
+      students: h.students,
+    });
+
+    const result = await sequential.register(validInput());
+
+    assert.equal(result.outcome, "success");
+    assert.equal(h.users.count, 1, "the user is written through users.create");
+    assert.equal(h.credentials.count, 1, "the credential through credentials.create");
+    assert.equal(h.students.count, 1, "the profile through students.createForUser");
+    assert.equal(h.studentRegistration.count, 0, "and the atomic port is untouched");
+  });
+
+  it("supplying the atomic port moves every write to it", async () => {
+    const atomic = createRegistrationService({
+      users: h.users,
+      credentials: h.credentials,
+      students: h.students,
+      registration: h.studentRegistration,
+    });
+
+    const result = await atomic.register(validInput());
+
+    assert.equal(result.outcome, "success");
+    assert.equal(h.studentRegistration.count, 1);
+    assert.equal(h.users.count + h.credentials.count + h.students.count, 0);
   });
 });

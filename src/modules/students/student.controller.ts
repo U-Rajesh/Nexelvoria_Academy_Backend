@@ -3,6 +3,7 @@ import type { Request, Response } from "express";
 import { sendPaginated, sendSuccess } from "../../utils/send";
 import type { StudentService } from "./student.service";
 import { ApiError } from "../../utils/api-error";
+import type { UpdateStudentInput } from "./student.types";
 import type {
   StudentApproveBody,
   StudentIdParams,
@@ -85,6 +86,21 @@ export const createStudentController = (service: StudentService) => ({
     const { status } = req.body as StudentStatusBody;
     const student = await service.setStudentStatus(studentId, status);
     sendSuccess(res, { data: student, message: `Student status set to ${student.status}` });
+  },
+
+  /** `GET /students/me` - authenticated student's profile */
+  async getMe(req: Request, res: Response): Promise<void> {
+    const student = await service.getStudentById(actorId(req));
+    sendSuccess(res, { data: student });
+  },
+
+  /** `PUT /students/me` - update authenticated student's profile */
+  async updateMe(req: Request, res: Response): Promise<void> {
+    const student = await service.updateStudentProfile(
+      actorId(req),
+      req.body as UpdateStudentInput,
+    );
+    sendSuccess(res, { data: student, message: "Profile updated successfully" });
   },
 });
 

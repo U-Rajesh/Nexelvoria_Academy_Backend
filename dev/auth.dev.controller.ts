@@ -58,6 +58,17 @@ const DUPLICATE_MOBILE_MESSAGE =
   "An account with this mobile number already exists. Please sign in or use another mobile number.";
 
 /**
+ * Used when the datastore reported a conflict without naming the field.
+ *
+ * Names neither identifier, because claiming the wrong one would send the
+ * student to the wrong recovery flow. Unlike the two above, this one is NOT
+ * account enumeration: it confirms nothing about either value.
+ */
+const DUPLICATE_IDENTIFIER_MESSAGE =
+  "An account with these details already exists. Please sign in, or use a different " +
+  "email address and mobile number.";
+
+/**
  * The 201 message.
  *
  * Deliberately NOT the mock's "Please complete dual email and mobile OTP
@@ -102,6 +113,12 @@ const toApiError = (
 
     case "mobile_taken":
       return ApiError.conflict(DUPLICATE_MOBILE_MESSAGE);
+
+    case "identifier_taken":
+      // 409, like the two above, but the datastore did not say WHICH
+      // identifier collided - so this message names neither rather than
+      // guessing and sending the student to the wrong recovery flow.
+      return ApiError.conflict(DUPLICATE_IDENTIFIER_MESSAGE);
 
     case "registration_unavailable":
       // 503, not 500: nothing is wrong with the request and a retry is

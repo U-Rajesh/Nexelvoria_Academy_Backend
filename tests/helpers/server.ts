@@ -13,6 +13,9 @@ export interface TestServer {
   close: () => Promise<void>;
   get: (path: string, init?: RequestInit) => Promise<Response>;
   post: (path: string, body?: unknown, init?: RequestInit) => Promise<Response>;
+  put: (path: string, body?: unknown, init?: RequestInit) => Promise<Response>;
+  patch: (path: string, body?: unknown, init?: RequestInit) => Promise<Response>;
+  delete: (path: string, init?: RequestInit) => Promise<Response>;
 }
 
 export const startServer = async (app: Application): Promise<TestServer> => {
@@ -30,11 +33,36 @@ export const startServer = async (app: Application): Promise<TestServer> => {
         server.close((err) => (err ? reject(err) : resolve()));
       }),
     get: (path, init) => fetch(`${url}${path}`, init),
-    post: (path, body, init) =>
-      fetch(`${url}${path}`, {
+    post: (path, body, init) => {
+      const { headers, ...restInit } = init ?? {};
+      return fetch(`${url}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+        headers: { "Content-Type": "application/json", ...(headers ?? {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...restInit,
+      });
+    },
+    put: (path, body, init) => {
+      const { headers, ...restInit } = init ?? {};
+      return fetch(`${url}${path}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...(headers ?? {}) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...restInit,
+      });
+    },
+    patch: (path, body, init) => {
+      const { headers, ...restInit } = init ?? {};
+      return fetch(`${url}${path}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...(headers ?? {}) },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...restInit,
+      });
+    },
+    delete: (path, init) =>
+      fetch(`${url}${path}`, {
+        method: "DELETE",
         ...init,
       }),
   };

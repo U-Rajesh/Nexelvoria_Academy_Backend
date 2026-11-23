@@ -13,7 +13,10 @@ import {
   type LoginService,
 } from "../src/modules/auth/login.service";
 import { hashPassword } from "../src/modules/auth/password.service";
-import { createLoggingOtpDelivery } from "../src/modules/auth/otp.delivery";
+import {
+  resolveOtpDelivery,
+  type OtpDeliveryPort,
+} from "../src/modules/auth/otp.delivery";
 import { createOtpService } from "../src/modules/auth/otp.service";
 import type { RegistrationServiceDeps } from "../src/modules/auth/registration.service";
 import {
@@ -93,11 +96,12 @@ export const createDevRegistrationDeps = (
  */
 export const createDevVerificationService = (
   container: AppContainer = createDevContainer(),
+  delivery?: OtpDeliveryPort,
 ): VerificationService =>
   createVerificationService({
     otp: createOtpService({
       challenges: container.repositories.otpChallenges,
-      delivery: createLoggingOtpDelivery(),
+      delivery: delivery ?? resolveOtpDelivery(),
     }),
     get users() {
       return container.repositories.users;

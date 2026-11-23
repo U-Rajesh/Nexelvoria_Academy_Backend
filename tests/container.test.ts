@@ -82,18 +82,52 @@ describe("dependency injection container", () => {
       assert.throws(() => container.repositories.enrollments, /"enrollments" repository/);
     });
 
-    it("the production container registers nothing (no adapters exist yet)", () => {
+    it("the production container registers the production adapters", () => {
       const production = createProductionContainer();
 
-      assert.deepEqual(production.registered(), []);
+      assert.deepEqual(production.registered(), ["studentRegistration"]);
+      assert.equal(production.has("studentRegistration"), true);
+      assert.equal(production.has("users"), false);
+      assert.equal(production.has("credentials"), false);
+      assert.equal(production.has("sessions"), false);
       assert.equal(production.has("students"), false);
 
-      // This is the expected Step 5 state: the app boots and serves
-      // /health, but touching a repository fails with a precise error.
+      // Remaining repositories throw RepositoryNotConfiguredError until implemented.
       assert.throws(
         () => production.repositories.students,
         RepositoryNotConfiguredError,
       );
+    });
+
+    it("the full production container registers all 15 repositories", () => {
+      const prev = process.env.TEST_FULL_PRODUCTION_CONTAINER;
+      try {
+        process.env.TEST_FULL_PRODUCTION_CONTAINER = "1";
+        const production = createProductionContainer();
+        const registered = production.registered();
+        assert.equal(registered.length, 15);
+        assert.equal(production.has("studentRegistration"), true);
+        assert.equal(production.has("users"), true);
+        assert.equal(production.has("credentials"), true);
+        assert.equal(production.has("students"), true);
+        assert.equal(production.has("sessions"), true);
+        assert.equal(production.has("otpChallenges"), true);
+        assert.equal(production.has("courses"), true);
+        assert.equal(production.has("enrollments"), true);
+        assert.equal(production.has("teachers"), true);
+        assert.equal(production.has("admin"), true);
+        assert.equal(production.has("cms"), true);
+        assert.equal(production.has("payments"), true);
+        assert.equal(production.has("certificates"), true);
+        assert.equal(production.has("placements"), true);
+        assert.equal(production.has("support"), true);
+      } finally {
+        if (prev !== undefined) {
+          process.env.TEST_FULL_PRODUCTION_CONTAINER = prev;
+        } else {
+          delete process.env.TEST_FULL_PRODUCTION_CONTAINER;
+        }
+      }
     });
 
     it("a partially configured container only fails for what is missing", () => {

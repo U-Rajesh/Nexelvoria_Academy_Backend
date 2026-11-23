@@ -62,15 +62,123 @@ export type CreateTeacherInput = Omit<
 >;
 
 /** Mutable teacher fields. */
-export type UpdateTeacherInput = Partial<
-  Pick<
-    Teacher,
-    | "name"
-    | "mobile"
-    | "avatarUrl"
-    | "specialization"
-    | "experienceYears"
-    | "bio"
-    | "qualifications"
-  >
->;
+export type UpdateTeacherInput = {
+  [K in "name" | "mobile" | "avatarUrl" | "specialization" | "experienceYears" | "bio" | "qualifications"]?:
+    | Teacher[K]
+    | undefined;
+};
+
+export interface BatchStudentInfo {
+  studentId: string;
+  studentName: string;
+  email: string;
+  mobile: string;
+  batchId: string;
+  batchName: string;
+  courseTitle: string;
+}
+
+export interface ClassSessionRecord {
+  id: string;
+  batchId: string;
+  courseId: string;
+  teacherUserId: string;
+  sessionTitle: string;
+  startsAt: string;
+  endsAt: string;
+  meetingUrl?: string | undefined;
+  status: string;
+  createdAt: string;
+}
+
+export interface AttendanceItem {
+  id: string;
+  classSessionId: string;
+  studentUserId: string;
+  status: "present" | "absent" | "late" | "excused";
+  remarks?: string | undefined;
+  markedAt: string;
+  markedByUserId: string;
+}
+
+export interface AssignmentRecord {
+  id: string;
+  courseId: string;
+  batchId?: string | undefined;
+  lessonId?: string | undefined;
+  title: string;
+  instructions?: string | undefined;
+  maximumMarks: number;
+  dueAt?: string | undefined;
+  allowLateSubmission: boolean;
+  status: string;
+  createdByTeacherUserId: string;
+  createdAt: string;
+}
+
+export interface AssignmentSubmissionRecord {
+  id: string;
+  assignmentId: string;
+  studentUserId: string;
+  submissionType: string;
+  githubUrl?: string | undefined;
+  textContent?: string | undefined;
+  objectKey?: string | undefined;
+  status: string;
+  submittedAt: string;
+  marksAwarded?: number | undefined;
+  feedback?: string | undefined;
+  evaluatedAt?: string | undefined;
+}
+
+export interface LearningMaterialRecord {
+  id: string;
+  lessonId: string;
+  materialName: string;
+  materialType: string;
+  externalUrl?: string | undefined;
+  fileSizeBytes?: number | undefined;
+  mimeType?: string | undefined;
+  uploadedByUserId?: string | undefined;
+  createdAt: string;
+}
+
+export interface LessonDoubtRecord {
+  id: string;
+  lessonId: string;
+  studentUserId: string;
+  doubtText: string;
+  status: string;
+  createdAt: string;
+  resolvedAt?: string | undefined;
+  replyText?: string | undefined;
+}
+
+export interface OnlineTestRecord {
+  id: string;
+  courseId: string;
+  batchId?: string | undefined;
+  title: string;
+  instructions?: string | undefined;
+  durationMinutes: number;
+  maximumMarks: number;
+  passingMarks?: number | undefined;
+  startsAt?: string | undefined;
+  endsAt?: string | undefined;
+  maxAttempts: number;
+  status: string;
+  createdByTeacherUserId: string;
+  createdAt: string;
+}
+
+export interface TestAttemptRecord {
+  id: string;
+  testId: string;
+  studentUserId: string;
+  attemptNumber: number;
+  totalMarks?: number | undefined;
+  status: string;
+  startedAt: string;
+  submittedAt?: string | undefined;
+  evaluatedAt?: string | undefined;
+}

@@ -12,6 +12,10 @@ import type { UserRepository } from "../users/user.repository";
 import { type RegistrationInput, registrationSchema } from "./auth.validation";
 import type { CredentialRepository } from "./credential.repository";
 import { hashPassword } from "./password.service";
+import {
+  RegistrationRejectedError,
+  type StudentRegistrationRepository,
+} from "./registration.repository";
 
 /**
  * Student self-registration.
@@ -47,11 +51,26 @@ import { hashPassword } from "./password.service";
  * ===========================================================================
  *
  * ===========================================================================
- * NOT ATOMIC. THREE SEQUENTIAL WRITES, AND THIS IS NOT PRODUCTION-READY.
+ * TWO PATHS, AND WHICH ONE RUNS DEPENDS ON ONE OPTIONAL DEPENDENCY.
+ *
+ * As of Step 6K Stage 2 this service has an ATOMIC path. Supply
+ * `deps.registration` - a `StudentRegistrationRepository` - and the whole
+ * sequential region below is skipped: identity, credential and profile are
+ * written by ONE call inside ONE datastore transaction, so `incomplete` and
+ * `profile_incomplete` cannot occur and there is no partial state to repair.
+ * That is Route A of docs/transaction-design.md section 3, and it is what a
+ * production registration route would be mounted on.
+ *
+ * OMIT it - which production, the development harness and the whole
+ * regression suite still do today - and the sequential path below runs
+ * unchanged. Everything from here to the end of this banner describes THAT
+ * path only.
+ * ---------------------------------------------------------------------------
+ * THE SEQUENTIAL PATH IS NOT ATOMIC, AND IS NOT PRODUCTION-READY.
  *
  * Three repositories, no unit of work (Q-CR6 / Q-X1), and no transaction is
- * invented here. Nothing below pretends that sequential repository calls are
- * transactional, because they are not.
+ * invented here. Nothing in that path pretends that sequential repository
+ * calls are transactional, because they are not.
  *
  * The ORDER is chosen so that the one failure we cannot avoid is the
  * RECOVERABLE one:
@@ -96,6 +115,20 @@ export type RegistrationFailureReason =
   | "email_taken"
   /** The mobile number is already registered. */
   | "mobile_taken"
+  /**
+   * The email or the mobile is taken, but the datastore did not say which.
+   *
+   * Only reachable on the ATOMIC path. `StudentRegistrationRepository`
+   * documents `field` as "email", "mobile", or - where the datastore
+   * reported no more than that SOME unique constraint failed - "record".
+   *
+   * It gets its own reason rather than being folded into `email_taken`
+   * because a caller maps that to a message naming the email, and telling
+   * a student their email is registered when it may have been their mobile
+   * sends them to the wrong recovery flow. Still a conflict, so still a
+   * 409 - just one that claims neither field.
+   */
+  | "identifier_taken"
   /**
    * The user was created but the credential was not, so the account cannot
    * be used and the identifiers are now held by an unusable record.
@@ -151,6 +184,25 @@ export interface RegistrationServiceDeps {
    * identity login resolves.
    */
   students: StudentRepository;
+  /**
+   * Student registration as ONE atomic operation.
+   *
+   * OPTIONAL, and ABSENT is exactly what production and every existing
+   * test get today - with it omitted this service behaves precisely as it
+   * did before, three sequential writes and all.
+   *
+   * SUPPLIED, it REPLACES `users` + `credentials` + `students` for the
+   * registration write. The three ports above stay on the deps because
+   * nothing else may be broken by this being optional, and because the
+   * sequential path remains the one the in-memory development harness and
+   * the regression suite exercise.
+   *
+   * This is Route A of docs/transaction-design.md section 3. When it is
+   * wired, `incomplete` and `profile_incomplete` become UNREACHABLE:
+   * there is no longer a window in which a user exists without a profile,
+   * so there is no partial state left to report.
+   */
+  registration?: StudentRegistrationRepository;
 }
 
 export interface RegistrationService {
@@ -222,9 +274,173 @@ export const createRegistrationService = (
       ? { outcome: "failure", reason }
       : { outcome: "failure", reason, issues };
 
-  /** Maps a duplicate-key error onto the field that collided. */
-  const duplicateReason = (err: DuplicateRecordError): RegistrationFailureReason =>
-    err.field.toLowerCase().includes("mobile") ? "mobile_taken" : "email_taken";
+  /**
+   * Maps a duplicate-key error onto the field that collided.
+   *
+   * THREE cases, because an atomic datastore can know less than a
+   * fine-grained one does. The sequential path only ever reaches here from
+   * `users.create`, which names "email" or "mobile", so its behaviour is
+   * unchanged; the third case exists for an atomic implementation that
+   * reports only that SOME unique constraint failed.
+   */
+  const duplicateReason = (err: DuplicateRecordError): RegistrationFailureReason => {
+    const field = err.field.toLowerCase();
+
+    if (field.includes("mobile")) {
+      return "mobile_taken";
+    }
+
+    if (field.includes("email")) {
+      return "email_taken";
+    }
+
+    return "identifier_taken";
+  };
+
+  /**
+   * Hashes the password ONCE, in the application, with argon2id.
+   *
+   * Shared by both paths, so a registration can never hash twice and can
+   * never hash anywhere else. NO DATASTORE MAY HASH: the value crosses the
+   * repository boundary as an opaque string, and the registration
+   * procedure is documented as accepting it that way.
+   *
+   * `hashPassword` enforces the password policy a second time, so a
+   * non-compliant password cannot reach storage even if a caller bypassed
+   * the schema.
+   */
+  const hashOnce = async (
+    password: string,
+  ): Promise<
+    { ok: true; passwordHash: string } | { ok: false; result: RegistrationResult }
+  > => {
+    try {
+      return { ok: true, passwordHash: await hashPassword(password) };
+    } catch (err) {
+      // The only expected cause is a policy violation, which the schema
+      // should already have caught.
+      logger.error("registration refused: password could not be hashed", {
+        errorType: describeError(err),
+      });
+
+      return {
+        ok: false,
+        result: fail("validation_failed", [
+          { field: "password", message: "Password does not meet the required policy" },
+        ]),
+      };
+    }
+  };
+
+  /**
+   * The ATOMIC path: validate, hash, ONE call.
+   *
+   * ==========================================================================
+   * WHAT THIS DELIBERATELY DOES NOT DO.
+   *
+   * NO FAST-PATH UNIQUENESS CHECK. The sequential path reads
+   * `existsByEmail`/`existsByMobile` first purely to avoid paying ~120ms of
+   * argon2 on an obvious duplicate - its own comment calls it a
+   * convenience, not the guard. Here the datastore performs that check
+   * INSIDE the transaction, under locks, which is strictly stronger; doing
+   * it again beforehand would add two round trips and a window in which the
+   * answer goes stale. The accepted cost is that a duplicate is detected
+   * after the hash rather than before, which the registration rate limiter
+   * already bounds.
+   *
+   * NO THREE WRITES, and no ordering rationale. Identity, credential and
+   * profile are one unit here, so there is no recoverable-versus-
+   * unrecoverable failure to arrange and nothing to compensate.
+   *
+   * NO READ-BACK AFTER THE WRITE. The sequential path confirms a profile by
+   * reading it when the write errors, because a timeout that committed is
+   * indistinguishable from one that did not. An atomic write has no such
+   * ambiguity: it either committed or it rolled back.
+   * ==========================================================================
+   */
+  const registerAtomically = async (
+    registration: StudentRegistrationRepository,
+    data: RegistrationInput,
+  ): Promise<RegistrationResult> => {
+    const hashed = await hashOnce(data.password);
+
+    if (!hashed.ok) {
+      return hashed.result;
+    }
+
+    let record;
+
+    try {
+      record = await registration.register({
+        name: data.name,
+        email: data.email,
+        mobile: data.mobile,
+        passwordHash: hashed.passwordHash,
+        profile: toStudentProfile(data),
+      });
+    } catch (err) {
+      if (err instanceof DuplicateRecordError) {
+        logger.warn("registration refused: identifier already registered", {
+          field: err.field,
+        });
+
+        return fail(duplicateReason(err));
+      }
+
+      if (err instanceof RegistrationRejectedError) {
+        // The datastore applies validation of its own, which the schema has
+        // already satisfied - so reaching here means the two disagree, and
+        // that is worth a log line naming the rule rather than an opaque
+        // failure. The reason code and the datastore's correlation id stay
+        // in the LOG: the client is told which FIELDS were refused and
+        // nothing about where the refusal came from.
+        logger.warn("registration refused: the datastore rejected the input", {
+          reasonCode: err.reasonCode,
+          ...(err.referenceId === undefined ? {} : { referenceId: err.referenceId }),
+          fields: err.issues.map((issue) => issue.field).join(","),
+        });
+
+        return fail("validation_failed", [...err.issues]);
+      }
+
+      // Nothing was written: an atomic failure rolls back. So this is the
+      // same answer as a repository that was unreachable before it wrote,
+      // and there is no partial state for an operator to repair.
+      logger.error("registration refused: the atomic registration failed", {
+        errorType: describeError(err),
+        isRepositoryError: err instanceof RepositoryError,
+      });
+
+      return fail("registration_unavailable");
+    }
+
+    // `studentProfileId` is logged and NEVER returned - see the identifier
+    // rule on the port. Every downstream flow addresses a student by the
+    // user id, so that is the only one that may leave this service.
+    logger.info("registration succeeded", {
+      userId: record.userId,
+      studentProfileId: record.studentProfileId,
+      ...(record.referenceId === undefined ? {} : { referenceId: record.referenceId }),
+    });
+
+    return {
+      outcome: "success",
+      data: {
+        // THE PUBLIC IDENTIFIER, and the contract the frontend already
+        // consumes: `RegisterPage` navigates to
+        // `/verify-otp?studentId=${result.tempStudentId}` and the email OTP
+        // challenge is keyed by this same value. Putting
+        // `record.studentProfileId` here would break verification, login's
+        // pending-profile lookup and admin approval at once.
+        tempStudentId: record.userId,
+        // As STORED, rather than as submitted: the datastore echoes both
+        // back, and reporting what was persisted is the honest answer. The
+        // schema has already normalised them, so these match the input.
+        email: record.email,
+        mobile: record.mobileNumber,
+      },
+    };
+  };
 
   return {
     async register(input: unknown): Promise<RegistrationResult> {
@@ -245,6 +461,19 @@ export const createRegistrationService = (
 
         return fail("validation_failed", issues);
       }
+
+      // --- 2. ONE ATOMIC WRITE, where a transactional datastore is wired -
+      // Checked straight after validation, so none of the sequential
+      // machinery below - the fast-path reads, the write ordering, the
+      // read-back - is reached at all on this path.
+      if (deps.registration !== undefined) {
+        return registerAtomically(deps.registration, parsed.data);
+      }
+
+      // ===================== THE SEQUENTIAL PATH =========================
+      // Everything from here down runs ONLY when no atomic repository is
+      // wired. Unchanged, and still not production-ready: see the
+      // transaction-boundary note below.
 
       // The schema lowercases and trims the email, so uniqueness checks and
       // storage agree regardless of database collation.
@@ -272,43 +501,37 @@ export const createRegistrationService = (
       }
 
       // --- 3. hash -------------------------------------------------------
-      // Enforces the policy a second time, so a non-compliant password can
-      // never reach storage even if a caller bypassed the schema.
-      let passwordHash: string;
+      // The same single hash both paths use. See `hashOnce`.
+      const hashed = await hashOnce(password);
 
-      try {
-        passwordHash = await hashPassword(password);
-      } catch (err) {
-        // The only expected cause is a policy violation, which the schema
-        // should already have caught.
-        logger.error("registration refused: password could not be hashed", {
-          errorType: describeError(err),
-        });
-
-        return fail("validation_failed", [
-          { field: "password", message: "Password does not meet the required policy" },
-        ]);
+      if (!hashed.ok) {
+        return hashed.result;
       }
 
+      const passwordHash = hashed.passwordHash;
+
       // =====================================================================
-      // TRANSACTION BOUNDARY - NOT YET TRANSACTIONAL.
+      // TRANSACTION BOUNDARY - NOT TRANSACTIONAL ON THIS PATH.
       //
-      // Stages 4, 5 and 6 below MUST become ONE atomic unit before this
-      // service is exposed over HTTP. Two candidate implementations:
+      // Stages 4, 5 and 6 below are three independent writes, so a failure
+      // at stage 5 or 6 leaves partial state an operator must resolve. NO
+      // PRODUCTION HTTP ROUTE MAY BE MOUNTED ON THIS PATH.
       //
-      //   (a) `dbo.USP_NXA_Register_Student` - if that stored procedure
-      //       inserts the user, the credential and the student inside one
-      //       transaction, this entire region collapses into a SINGLE
-      //       repository call and the ordering notes above become moot. Its
-      //       signature is not yet available to the backend.
-      //   (b) A unit-of-work port (open-questions **Q-X1**) wrapping the
-      //       three writes in one mssql transaction.
+      // THE ANSWER NOW EXISTS, and it is the branch above rather than
+      // anything in this region. `dbo.USP_NXA_Register_Student` was
+      // delivered and does wrap the user and profile inserts in one
+      // transaction with rollback, so Route A of
+      // docs/transaction-design.md section 3 applies: supplying
+      // `deps.registration` collapses these three stages into a single call
+      // and makes the ordering rationale above moot. The unit-of-work port
+      // of **Q-X1** is therefore NOT needed for registration - it may still
+      // be needed elsewhere.
       //
-      // Until one of those exists, a failure at stage 5 or 6 leaves partial
-      // state that an operator must resolve. DO NOT MOUNT AN HTTP ROUTE FOR
-      // REGISTRATION UNTIL THIS IS CLOSED.
+      // This region is kept because it is the path the in-memory
+      // development harness and the regression suite exercise, and because
+      // no SQL adapter implementing the port exists yet (Stage 3).
       //
-      // Today three independent guards keep this flow unreachable in
+      // Three independent guards still keep registration unreachable in
       // production: `/auth` is not mounted in src/routes/index.ts,
       // `createProductionContainer()` registers no repositories, and no SQL
       // adapters exist.

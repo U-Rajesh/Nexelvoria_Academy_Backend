@@ -1,6 +1,6 @@
 import { Router, type RequestHandler } from "express";
 
-import { requireAdmin } from "../../middleware/authorize.middleware";
+import { requireAdmin, requireStudent } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
 import { createStudentController } from "./student.controller";
 import { createStudentService, type StudentServiceDeps } from "./student.service";
@@ -8,6 +8,7 @@ import {
   studentApproveBodySchema,
   studentIdParamsSchema,
   studentListQuerySchema,
+  studentProfileUpdateBodySchema,
   studentRejectBodySchema,
   studentStatusBodySchema,
 } from "./student.validation";
@@ -71,6 +72,20 @@ export const createStudentRoutes = (options: StudentRoutesOptions): Router => {
     options.authenticate === undefined
       ? [requireAdmin]
       : [options.authenticate, requireAdmin];
+
+  const studentGuards: RequestHandler[] =
+    options.authenticate === undefined
+      ? [requireStudent]
+      : [options.authenticate, requireStudent];
+
+  // --- Student's own profile (Batch 2) - MUST be mounted before /:studentId ---
+  router.get("/me", ...studentGuards, controller.getMe);
+  router.put(
+    "/me",
+    ...studentGuards,
+    validate({ body: studentProfileUpdateBodySchema }),
+    controller.updateMe,
+  );
 
   router.get("/", ...guards, validate({ query: studentListQuerySchema }), controller.list);
 

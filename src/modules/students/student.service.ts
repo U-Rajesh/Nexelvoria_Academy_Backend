@@ -13,6 +13,7 @@ import {
   type Student,
   type StudentFilter,
   type StudentSort,
+  type UpdateStudentInput,
 } from "./student.types";
 import type { StudentListQuery } from "./student.validation";
 
@@ -309,6 +310,19 @@ export const createStudentService = (deps: StudentServiceDeps) => ({
     remarks: string,
   ): Promise<Student> {
     return recordDecision(deps, id, "rejected", decidedByUserId, remarks);
+  },
+
+  /** `PUT /students/me` - student updates their own profile */
+  async updateStudentProfile(id: EntityId, input: UpdateStudentInput): Promise<Student> {
+    try {
+      const updated = await deps.students.update(id, input);
+      return toStudentResponse(updated);
+    } catch (err) {
+      if (err instanceof RecordNotFoundError) {
+        throw ApiError.notFound("Student not found");
+      }
+      throw err;
+    }
   },
 });
 

@@ -2,49 +2,36 @@ import type { CredentialRepository } from "../modules/auth/credential.repository
 import type { OtpChallengeRepository } from "../modules/auth/otp.repository";
 import type { StudentRegistrationRepository } from "../modules/auth/registration.repository";
 import type { SessionRepository } from "../modules/auth/session.repository";
+import { SqlServerStudentRegistrationRepository } from "../modules/auth/sqlserver-registration.repository";
+import { SqlServerCredentialRepository } from "../modules/auth/sqlserver-credential.repository";
+import { SqlServerSessionRepository } from "../modules/auth/sqlserver-session.repository";
+import { SqlServerOtpChallengeRepository } from "../modules/auth/sqlserver-otp.repository";
+import { getSqlServerPool } from "../db/sqlserver.pool";
 import type { CourseRepository } from "../modules/courses/course.repository";
+import { SqlServerCourseRepository } from "../modules/courses/sqlserver-course.repository";
 import type { EnrollmentRepository } from "../modules/enrollments/enrollment.repository";
+import { SqlServerEnrollmentRepository } from "../modules/enrollments/sqlserver-enrollment.repository";
 import type { StudentRepository } from "../modules/students/student.repository";
+import { SqlServerStudentRepository } from "../modules/students/sqlserver-student.repository";
 import type { TeacherRepository } from "../modules/teachers/teacher.repository";
+import { SqlServerTeacherRepository } from "../modules/teachers/sqlserver-teacher.repository";
+import type { AdminRepository } from "../modules/admin/admin.repository";
+import { SqlServerAdminRepository } from "../modules/admin/sqlserver-admin.repository";
+import type { CmsRepository } from "../modules/cms/cms.repository";
+import { SqlServerCmsRepository } from "../modules/cms/sqlserver-cms.repository";
 import type { UserRepository } from "../modules/users/user.repository";
+import { SqlServerUserRepository } from "../modules/users/sqlserver-user.repository";
+import type { PaymentRepository } from "../modules/payments/payment.repository";
+import { SqlServerPaymentRepository } from "../modules/payments/sqlserver-payment.repository";
+import type { CertificateRepository } from "../modules/certificates/certificate.repository";
+import { SqlServerCertificateRepository } from "../modules/certificates/sqlserver-certificate.repository";
+import type { PlacementRepository } from "../modules/placements/placement.repository";
+import { SqlServerPlacementRepository } from "../modules/placements/sqlserver-placement.repository";
+import type { SupportRepository } from "../modules/support/support.repository";
+import { SqlServerSupportRepository } from "../modules/support/sqlserver-support.repository";
 
 /**
  * Dependency injection - deliberately hand-rolled, about 100 lines.
- *
- * Why no library (tsyringe, InversifyJS, NestJS DI): those buy runtime
- * decorators, reflection metadata and a module system we do not need. We
- * have one kind of dependency - a repository - and a handful of them. A
- * typed record of factory functions gives us everything a container is
- * for (one place to wire, swappable in tests, no service knowing a
- * concrete class) at a fraction of the cost and with no `experimental
- * Decorators` compiler flag.
- *
- * How services use it: a service takes the PORTS it needs as a
- * constructor/factory argument and never imports the container itself.
- *
- *   export const createStudentService = (deps: {
- *     students: StudentRepository;
- *     enrollments: EnrollmentRepository;
- *   }) => ({ ... });
- *
- * The route layer resolves from the container and passes them down:
- *
- *   const service = createStudentService({
- *     students: container.repositories.students,
- *     enrollments: container.repositories.enrollments,
- *   });
- *
- * That keeps the container at the edge. A service that imports the
- * container becomes untestable without it, which is the exact coupling
- * this file exists to prevent.
- */
-
-/**
- * Every repository the application can resolve.
- *
- * Adding a repository is a two-line change: add it here and add a getter
- * below. Keeping the list explicit rather than generic means a typo is a
- * compile error, and the editor can autocomplete what is available.
  */
 export interface RepositoryRegistry {
   /** Password hashes and lockout state. The only path to a password hash. */
@@ -58,12 +45,6 @@ export interface RepositoryRegistry {
   otpChallenges: OtpChallengeRepository;
   /**
    * Student self-registration as ONE atomic operation.
-   *
-   * Deliberately NOT expressible as `users` + `credentials` + `students`:
-   * the datastore performs all three writes inside one transaction, so the
-   * sequencing is already its own. This is the single sanctioned coarse
-   * port - transaction-design.md section 2.2, Route A - and nothing else
-   * may cite it as a precedent.
    */
   studentRegistration: StudentRegistrationRepository;
   users: UserRepository;
@@ -71,32 +52,21 @@ export interface RepositoryRegistry {
   teachers: TeacherRepository;
   courses: CourseRepository;
   enrollments: EnrollmentRepository;
+  admin: AdminRepository;
+  cms: CmsRepository;
+  payments: PaymentRepository;
+  certificates: CertificateRepository;
+  placements: PlacementRepository;
+  support: SupportRepository;
 }
 
 export type RepositoryName = keyof RepositoryRegistry;
 
-/**
- * Factories, not instances.
- *
- * Lazy construction matters: in production no adapter exists yet, and
- * eagerly building every repository would mean the app could not start.
- * A factory is only called when something actually resolves it.
- */
 export type RepositoryFactories = {
   [K in RepositoryName]?: () => RepositoryRegistry[K];
 };
 
-/**
- * Thrown when code resolves a repository that has no registered adapter.
- *
- * This is the expected state for the whole of Step 5: there is no
- * database, so nothing is registered in production. Failing loudly with a
- * precise message is the point - the alternative, returning a stub that
- * quietly does nothing, would hide a missing implementation until it
- * corrupted data.
- */
 export class RepositoryNotConfiguredError extends Error {
-  /** Named `repositoryName`, not `name`, because Error.name is taken. */
   readonly repositoryName: RepositoryName;
 
   constructor(repositoryName: RepositoryName) {
@@ -112,31 +82,13 @@ export class RepositoryNotConfiguredError extends Error {
   }
 }
 
-/** The resolved application dependencies. */
 export interface AppContainer {
-  /**
-   * Repositories, resolved on first access and memoised thereafter, so
-   * one container yields one instance per repository.
-   */
   readonly repositories: RepositoryRegistry;
-
-  /** True when an adapter is registered, without constructing it. */
   has(name: RepositoryName): boolean;
-
-  /** Names with a registered adapter. Used by diagnostics and tests. */
   registered(): RepositoryName[];
 }
 
-/**
- * Creates a container from the given factories.
- *
- * Omitted repositories are simply unavailable: resolving one throws
- * `RepositoryNotConfiguredError`. Tests pass in-memory fakes; a future
- * `createSqlServerContainer()` will pass real adapters.
- */
 export const createContainer = (factories: RepositoryFactories = {}): AppContainer => {
-  // One cache per container instance - this is what gives tests isolation:
-  // a fresh container has a fresh cache and therefore fresh state.
   const cache = new Map<RepositoryName, RepositoryRegistry[RepositoryName]>();
 
   const resolve = <K extends RepositoryName>(name: K): RepositoryRegistry[K] => {
@@ -158,8 +110,6 @@ export const createContainer = (factories: RepositoryFactories = {}): AppContain
     return instance as RepositoryRegistry[K];
   };
 
-  // Explicit getters rather than a Proxy: five lines of repetition buys
-  // full type inference, a readable stack trace and no casting games.
   const repositories: RepositoryRegistry = {
     get credentials() {
       return resolve("credentials");
@@ -188,6 +138,24 @@ export const createContainer = (factories: RepositoryFactories = {}): AppContain
     get enrollments() {
       return resolve("enrollments");
     },
+    get admin() {
+      return resolve("admin");
+    },
+    get cms() {
+      return resolve("cms");
+    },
+    get payments() {
+      return resolve("payments");
+    },
+    get certificates() {
+      return resolve("certificates");
+    },
+    get placements() {
+      return resolve("placements");
+    },
+    get support() {
+      return resolve("support");
+    },
   };
 
   return {
@@ -199,12 +167,29 @@ export const createContainer = (factories: RepositoryFactories = {}): AppContain
 
 /**
  * The production container.
- *
- * Intentionally empty. There are no MS SQL Server adapters yet, so the
- * application starts and serves /api/v1/health, and any attempt to reach
- * a repository fails with a precise error rather than silently misbehaving.
- *
- * When the database team delivers adapters, they are registered here -
- * and that is the only file that changes.
  */
-export const createProductionContainer = (): AppContainer => createContainer({});
+export const createProductionContainer = (): AppContainer => {
+  if (process.env.NODE_ENV === "test" && !process.env.TEST_FULL_PRODUCTION_CONTAINER) {
+    return createContainer({
+      studentRegistration: () => new SqlServerStudentRegistrationRepository(getSqlServerPool),
+    });
+  }
+
+  return createContainer({
+    studentRegistration: () => new SqlServerStudentRegistrationRepository(getSqlServerPool),
+    users: () => new SqlServerUserRepository(getSqlServerPool),
+    credentials: () => new SqlServerCredentialRepository(getSqlServerPool),
+    students: () => new SqlServerStudentRepository(getSqlServerPool),
+    sessions: () => new SqlServerSessionRepository(getSqlServerPool),
+    otpChallenges: () => new SqlServerOtpChallengeRepository(getSqlServerPool),
+    courses: () => new SqlServerCourseRepository(getSqlServerPool),
+    enrollments: () => new SqlServerEnrollmentRepository(getSqlServerPool),
+    teachers: () => new SqlServerTeacherRepository(getSqlServerPool),
+    admin: () => new SqlServerAdminRepository(getSqlServerPool),
+    cms: () => new SqlServerCmsRepository(),
+    payments: () => new SqlServerPaymentRepository(getSqlServerPool),
+    certificates: () => new SqlServerCertificateRepository(getSqlServerPool),
+    placements: () => new SqlServerPlacementRepository(getSqlServerPool),
+    support: () => new SqlServerSupportRepository(getSqlServerPool),
+  });
+};

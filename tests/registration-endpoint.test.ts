@@ -664,13 +664,12 @@ describe("the production application is unchanged", () => {
     await server.close();
   });
 
-  it("mounts NO registration route (Q-X1 still open)", async () => {
+  it("mounts the production registration route (Q-X1 resolved in Step 6K)", async () => {
     const res = await server.post("/api/v1/auth/register", validInput());
 
-    assert.equal(res.status, 404);
-    const body = await json(res);
-    assert.equal(body["success"], false);
-    assert.equal(body["error"], "ROUTE_NOT_FOUND");
+    // The route is mounted in production; answers 201 on success or 409 on duplicate (never 404)
+    assert.notEqual(res.status, 404, "POST /api/v1/auth/register must be mounted in production");
+    assert.ok(res.status === 201 || res.status === 409);
   });
 
   it("mounts no /auth surface at all", async () => {

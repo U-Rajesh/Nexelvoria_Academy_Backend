@@ -109,6 +109,13 @@ export const createCourseRoutes = (options: CourseRoutesOptions): Router => {
   );
 
   router.put(
+    "/:courseId",
+    ...guards,
+    validate({ params: courseIdParamsSchema, body: updateCourseBodySchema }),
+    controller.update,
+  );
+
+  router.put(
     "/:courseId/curriculum",
     ...guards,
     validate({ params: courseIdParamsSchema, body: curriculumBodySchema }),
