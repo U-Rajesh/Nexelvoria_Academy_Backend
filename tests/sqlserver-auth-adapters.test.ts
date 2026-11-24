@@ -6,6 +6,14 @@ import { SqlServerUserRepository } from "../src/modules/users/sqlserver-user.rep
 import { SqlServerCredentialRepository } from "../src/modules/auth/sqlserver-credential.repository";
 import { SqlServerSessionRepository } from "../src/modules/auth/sqlserver-session.repository";
 import { SqlServerOtpChallengeRepository } from "../src/modules/auth/sqlserver-otp.repository";
+import {
+  SqlServerStudentRegistrationRepository,
+  SqlRepositoryError,
+} from "../src/modules/auth/sqlserver-registration.repository";
+import {
+  RegistrationRejectedError,
+  type StudentRegistrationInput,
+} from "../src/modules/auth/registration.repository";
 import { DuplicateRecordError, RecordNotFoundError } from "../src/repositories/repository.errors";
 
 // Mock SQL Request and ConnectionPool
@@ -405,5 +413,281 @@ describe("SqlServerOtpChallengeRepository (unit with mock pool)", () => {
 
     const deleted = await repo.purgeExpiredBefore(new Date().toISOString());
     assert.equal(deleted, 5);
+  });
+});
+
+class MockSqlTransaction {
+  public began = false;
+  public committed = false;
+  public rolledBack = false;
+  public queries: Array<{ sql: string; inputs: Record<string, unknown> }> = [];
+  public handler: (query: string, inputs: Record<string, unknown>) => unknown;
+
+  constructor(handler: (query: string, inputs: Record<string, unknown>) => unknown) {
+    this.handler = handler;
+  }
+
+  async begin(): Promise<void> {
+    this.began = true;
+  }
+
+  async commit(): Promise<void> {
+    this.committed = true;
+  }
+
+  async rollback(): Promise<void> {
+    this.rolledBack = true;
+  }
+
+  request(): MockSqlRequest {
+    return new MockSqlRequest((query, inputs) => {
+      this.queries.push({ sql: query, inputs });
+      return this.handler(query, inputs);
+    });
+  }
+}
+
+describe("SqlServerStudentRegistrationRepository (unit with mock transaction)", () => {
+  const baseInput: StudentRegistrationInput = {
+    name: "Rohan Kumar",
+    email: "rohan@example.com",
+    mobile: "9876543210",
+    passwordHash: "$argon2id$v=19$m=65536,t=3,p=4$somehash",
+    profile: {
+      courseInterestedIn: "Full Stack Web Development",
+      collegeName: "IIT Delhi",
+      degreeBranch: "BTech Computer Science",
+      passingYear: "2026",
+      dateOfBirth: "2004-05-15",
+      gender: "male",
+      fullAddress: "Hostel 4, IIT Delhi, Hauz Khas",
+      guardianContact: "9876500000",
+      resumeFileName: "resume.pdf",
+      linkedInUrl: "https://linkedin.com/in/rohan",
+      githubUrl: "https://github.com/rohan",
+    },
+  };
+
+  it("fails fast with plain Error if mandatory field is missing", async () => {
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool);
+
+    await assert.rejects(
+      () => repo.register({ ...baseInput, name: "   " }),
+      /mandatory/,
+    );
+  });
+
+  it("throws RegistrationRejectedError if email format is invalid", async () => {
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool);
+
+    await assert.rejects(
+      () => repo.register({ ...baseInput, email: "invalid-email" }),
+      (err: unknown) => {
+        assert.ok(err instanceof RegistrationRejectedError);
+        assert.equal((err as RegistrationRejectedError).reasonCode, "INVALID_EMAIL");
+        return true;
+      },
+    );
+  });
+
+  it("throws RegistrationRejectedError if mobile is invalid", async () => {
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool);
+
+    await assert.rejects(
+      () => repo.register({ ...baseInput, mobile: "abc" }),
+      (err: unknown) => {
+        assert.ok(err instanceof RegistrationRejectedError);
+        assert.equal((err as RegistrationRejectedError).reasonCode, "INVALID_MOBILE");
+        return true;
+      },
+    );
+  });
+
+  it("detects existing email during lock check and rolls back", async () => {
+    let mockTx: MockSqlTransaction | undefined;
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool, {
+      transactionFactory: () => {
+        mockTx = new MockSqlTransaction((q) => {
+          if (q.includes("dbo.NXA_Users WITH (UPDLOCK, HOLDLOCK)")) {
+            return {
+              recordset: [{
+                NormalizedEmail: "rohan@example.com",
+                NormalizedMobile: "+911111111111",
+              }],
+            };
+          }
+          return {};
+        });
+        return mockTx as unknown as sql.Transaction;
+      },
+    });
+
+    await assert.rejects(
+      () => repo.register(baseInput),
+      (err: unknown) => {
+        assert.ok(err instanceof DuplicateRecordError);
+        assert.equal((err as DuplicateRecordError).field, "email");
+        return true;
+      },
+    );
+
+    assert.ok(mockTx?.began);
+    assert.ok(mockTx?.rolledBack);
+    assert.equal(mockTx?.committed, false);
+  });
+
+  it("detects existing mobile during lock check and rolls back", async () => {
+    let mockTx: MockSqlTransaction | undefined;
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool, {
+      transactionFactory: () => {
+        mockTx = new MockSqlTransaction((q) => {
+          if (q.includes("dbo.NXA_Users WITH (UPDLOCK, HOLDLOCK)")) {
+            return {
+              recordset: [{
+                NormalizedEmail: "other@example.com",
+                NormalizedMobile: "+919876543210",
+              }],
+            };
+          }
+          return {};
+        });
+        return mockTx as unknown as sql.Transaction;
+      },
+    });
+
+    await assert.rejects(
+      () => repo.register(baseInput),
+      (err: unknown) => {
+        assert.ok(err instanceof DuplicateRecordError);
+        assert.equal((err as DuplicateRecordError).field, "mobile");
+        return true;
+      },
+    );
+
+    assert.ok(mockTx?.began);
+    assert.ok(mockTx?.rolledBack);
+    assert.equal(mockTx?.committed, false);
+  });
+
+  it("rolls back and throws SqlRepositoryError if student role is not found in dbo.NXA_Roles", async () => {
+    let mockTx: MockSqlTransaction | undefined;
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool, {
+      transactionFactory: () => {
+        mockTx = new MockSqlTransaction((q) => {
+          if (q.includes("dbo.NXA_Users WITH (UPDLOCK, HOLDLOCK)")) {
+            return { recordset: [] };
+          }
+          if (q.includes("INSERT INTO dbo.NXA_Users")) {
+            return { recordset: [{ UserId: 501, PublicUserId: "uuid-501" }] };
+          }
+          if (q.includes("INSERT INTO dbo.NXA_StudentProfiles")) {
+            return { recordset: [{ StudentProfileId: 601 }] };
+          }
+          if (q.includes("FROM dbo.NXA_Roles WHERE RoleCode = @roleCode")) {
+            return { recordset: [] }; // Missing role!
+          }
+          return {};
+        });
+        return mockTx as unknown as sql.Transaction;
+      },
+    });
+
+    await assert.rejects(
+      () => repo.register(baseInput),
+      (err: unknown) => {
+        assert.ok(err instanceof SqlRepositoryError);
+        assert.equal((err as SqlRepositoryError).entity, "role");
+        assert.equal((err as SqlRepositoryError).operation, "lookup");
+        return true;
+      },
+    );
+
+    assert.ok(mockTx?.began);
+    assert.ok(mockTx?.rolledBack);
+    assert.equal(mockTx?.committed, false);
+  });
+
+  it("successfully completes registration transaction and commits", async () => {
+    let mockTx: MockSqlTransaction | undefined;
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool, {
+      transactionFactory: () => {
+        mockTx = new MockSqlTransaction((q) => {
+          if (q.includes("dbo.NXA_Users WITH (UPDLOCK, HOLDLOCK)")) {
+            return { recordset: [] };
+          }
+          if (q.includes("INSERT INTO dbo.NXA_Users")) {
+            return { recordset: [{ UserId: 501, PublicUserId: "public-uuid-501" }] };
+          }
+          if (q.includes("INSERT INTO dbo.NXA_StudentProfiles")) {
+            return { recordset: [{ StudentProfileId: 601 }] };
+          }
+          if (q.includes("FROM dbo.NXA_Roles WHERE RoleCode = @roleCode")) {
+            return { recordset: [{ RoleId: 2 }] };
+          }
+          if (q.includes("INSERT INTO dbo.NXA_UserRoles")) {
+            return { rowsAffected: [1] };
+          }
+          return {};
+        });
+        return mockTx as unknown as sql.Transaction;
+      },
+    });
+
+    const result = await repo.register(baseInput);
+
+    assert.ok(mockTx?.began);
+    assert.ok(mockTx?.committed);
+    assert.equal(mockTx?.rolledBack, false);
+
+    assert.equal(result.userId, "501");
+    assert.equal(result.studentProfileId, "601");
+    assert.equal(result.email, "rohan@example.com");
+    assert.equal(result.mobileNumber, "9876543210");
+    assert.equal(result.status, "pending");
+    assert.equal(result.adminApprovalStatus, "pending");
+    assert.equal(result.isEmailVerified, false);
+    assert.equal(result.isMobileVerified, false);
+    assert.equal(result.referenceId, "public-uuid-501");
+  });
+
+  it("maps SQL 2627 constraint error on email to DuplicateRecordError and rolls back", async () => {
+    let mockTx: MockSqlTransaction | undefined;
+    const pool = createMockPool(() => ({}));
+    const repo = new SqlServerStudentRegistrationRepository(pool, {
+      transactionFactory: () => {
+        mockTx = new MockSqlTransaction((q) => {
+          if (q.includes("dbo.NXA_Users WITH (UPDLOCK, HOLDLOCK)")) {
+            return { recordset: [] };
+          }
+          if (q.includes("INSERT INTO dbo.NXA_Users")) {
+            const err = new Error("Violation of UNIQUE KEY constraint 'UQ_NXA_Users_NormalizedEmail'.");
+            (err as unknown as { number: number }).number = 2627;
+            return err;
+          }
+          return {};
+        });
+        return mockTx as unknown as sql.Transaction;
+      },
+    });
+
+    await assert.rejects(
+      () => repo.register(baseInput),
+      (err: unknown) => {
+        assert.ok(err instanceof DuplicateRecordError);
+        assert.equal((err as DuplicateRecordError).field, "email");
+        return true;
+      },
+    );
+
+    assert.ok(mockTx?.began);
+    assert.ok(mockTx?.rolledBack);
+    assert.equal(mockTx?.committed, false);
   });
 });
