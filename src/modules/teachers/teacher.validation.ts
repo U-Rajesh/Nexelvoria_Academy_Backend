@@ -15,7 +15,8 @@ export const attendanceRecordItemSchema = z
   .object({
     studentUserId: z.string().trim().min(1).optional(),
     studentId: z.string().trim().min(1).optional(),
-    status: z.enum(["present", "absent", "late", "excused"]),
+    // BR-010: attendance is Present, Absent or Leave only.
+    status: z.enum(["present", "absent", "leave"]),
     remarks: z.string().trim().max(500).optional(),
   })
   .transform((val) => ({

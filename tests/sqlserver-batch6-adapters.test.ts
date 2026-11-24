@@ -39,6 +39,12 @@ const createMockPool = (
 ): sql.ConnectionPool => {
   return {
     request: () => new MockSqlRequest(handler),
+    transaction: () => ({
+      begin: async () => {},
+      commit: async () => {},
+      rollback: async () => {},
+      request: () => new MockSqlRequest(handler),
+    }),
   } as unknown as sql.ConnectionPool;
 };
 
@@ -261,45 +267,33 @@ describe("Batch 6 SQL Server Adapters (Unit with mock pool)", () => {
   });
 
   describe("SqlServerPlacementRepository", () => {
-    it("handles companies, jobs, applications, and mock interviews", async () => {
+    it("handles companies and mock interviews with identity ids (full coverage: placement-schema.test.ts)", async () => {
       let createdCompany = false;
       let scheduledMock = false;
 
-      const pool = createMockPool((query, _inputs) => {
+      const pool = createMockPool((query) => {
         if (query.includes("INSERT INTO dbo.NXA_Companies")) {
           createdCompany = true;
-          return { rowsAffected: [1] };
+          assert.doesNotMatch(query, /HiringStatus|LogoUrl|CompanyId,/, "only live columns; the id is an identity");
+          return { recordset: [{ CompanyId: 11 }] };
         }
-        if (query.includes("SELECT CompanyId, CompanyName")) {
+        if (query.includes("UPPER(LTRIM(RTRIM(CompanyName)))")) return { recordset: [] }; // name not taken
+        if (query.includes("FROM dbo.NXA_Companies")) {
           return {
             recordset: [
-              {
-                CompanyId: "comp-1",
-                CompanyName: "TCS",
-                WebsiteUrl: "https://tcs.com",
-                Industry: "IT Services",
-                HiringStatus: "active",
-                LogoUrl: null,
-                CreatedAt: new Date(),
-              },
+              { CompanyId: 11, CompanyName: "TCS", WebsiteUrl: "https://tcs.com", Industry: "IT Services", IsActive: true, CreatedAt: new Date() },
             ],
           };
         }
         if (query.includes("INSERT INTO dbo.NXA_MockInterviews")) {
           scheduledMock = true;
-          return { rowsAffected: [1] };
+          assert.doesNotMatch(query, /\(\s*MockInterviewId/, "the id is an identity");
+          return { recordset: [{ MockInterviewId: 21 }] };
         }
-        if (query.includes("SELECT m.MockInterviewId")) {
+        if (query.includes("FROM dbo.NXA_MockInterviews")) {
           return {
             recordset: [
-              {
-                MockInterviewId: "mock-1",
-                StudentUserId: "student-1",
-                TeacherUserId: "teacher-1",
-                ScheduledAt: new Date(),
-                InterviewStatus: "scheduled",
-                CreatedAt: new Date(),
-              },
+              { MockInterviewId: 21, StudentUserId: 301, TeacherUserId: 401, ScheduledAt: new Date(), InterviewStatus: "scheduled", CreatedAt: new Date() },
             ],
           };
         }
@@ -308,111 +302,72 @@ describe("Batch 6 SQL Server Adapters (Unit with mock pool)", () => {
 
       const repo = new SqlServerPlacementRepository(async () => pool);
 
-      const comp = await repo.createCompany({
-        companyName: "TCS",
-        websiteUrl: "https://tcs.com",
-        industry: "IT Services",
-        hiringStatus: "active",
-      });
+      const comp = await repo.createCompany({ companyName: "TCS", websiteUrl: "https://tcs.com", industry: "IT Services", isActive: true }, "7");
       assert.equal(createdCompany, true);
-      assert.equal(comp.companyName, "TCS");
+      assert.equal(comp.id, "11");
+      assert.equal(comp.hiringStatus, "active");
 
       const companies = await repo.getCompanies();
       assert.equal(companies.length, 1);
       assert.equal(companies[0]!.companyName, "TCS");
 
-      await repo.scheduleMockInterview({
-        studentUserId: "student-1",
-        teacherUserId: "teacher-1",
+      const mock = await repo.scheduleMockInterview({
+        studentUserId: "301",
+        teacherUserId: "401",
         scheduledAt: new Date().toISOString(),
         interviewStatus: "scheduled",
       });
       assert.equal(scheduledMock, true);
+      assert.equal(mock.id, "21");
     });
   });
 
   describe("SqlServerSupportRepository", () => {
-    it("handles tickets, replies, notifications, audit logs, and settings", async () => {
-      let insertedTicket = false;
-      let insertedReply = false;
-      let updatedSetting = false;
-
-      const pool = createMockPool((query, inputs) => {
+    it("creates tickets and replies with database-generated numeric ids (full coverage: support-numeric-ids.test.ts)", async () => {
+      let insertedTicket = "";
+      let insertedReply = "";
+      const pool = createMockPool((query) => {
+        if (query.includes("FROM dbo.NXA_SupportTicketCategories WHERE")) return { recordset: [{ SupportTicketCategoryId: 3 }] };
         if (query.includes("INSERT INTO dbo.NXA_SupportTickets")) {
-          insertedTicket = true;
-          return { rowsAffected: [1] };
+          insertedTicket = query;
+          return { recordset: [{ SupportTicketId: 501 }] };
         }
         if (query.includes("INSERT INTO dbo.NXA_TicketReplies")) {
-          insertedReply = true;
-          return { rowsAffected: [1] };
+          insertedReply = query;
+          return { recordset: [{ TicketReplyId: 601 }] };
         }
-        if (query.includes("SELECT TOP 1 t.SupportTicketId")) {
+        if (query.includes("FROM dbo.NXA_TicketReplies r")) {
           return {
-            recordset: [
-              {
-                SupportTicketId: inputs.SupportTicketId,
-                TicketNumber: "TCK-001",
-                StudentUserId: "student-1",
-                CategoryId: "tech",
-                Subject: "Course Access",
-                Description: "Cannot access lesson 3",
-                Priority: "medium",
-                TicketStatus: "open",
-                CreatedAt: new Date(),
-              },
-            ],
+            recordset: [{ TicketReplyId: 601, SupportTicketId: 501, RepliedByUserId: 301, ReplyText: "Still having issues.", IsInternal: false, RepliedAt: new Date() }],
           };
         }
-        if (query.includes("SELECT r.TicketReplyId")) {
-          return { recordset: [] };
-        }
-        if (query.includes("UPDATE dbo.NXA_InstituteSettings")) {
-          updatedSetting = true;
-          return { rowsAffected: [1] };
-        }
-        if (query.includes("SELECT TOP 1 InstituteSettingId")) {
+        if (query.includes("WITH (UPDLOCK, HOLDLOCK)")) return { recordset: [{ TicketStatus: "open" }] };
+        if (query.includes("FROM dbo.NXA_SupportTickets t")) {
           return {
-            recordset: [
-              {
-                InstituteSettingId: "set-1",
-                SettingKey: inputs.SettingKey,
-                SettingValue: "Nexelvoria Live",
-                ValueType: "string",
-                IsSecret: 0,
-                UpdatedAt: new Date(),
-              },
-            ],
+            recordset: [{
+              SupportTicketId: 501, TicketNumber: "TCK-001", StudentUserId: 301, CategoryId: 3, CategoryName: "Technical",
+              Subject: "Course Access", Description: "Cannot access lesson 3", Priority: "medium", TicketStatus: "open", CreatedAt: new Date(),
+            }],
           };
         }
         return {};
       });
 
       const repo = new SqlServerSupportRepository(async () => pool);
-
       const ticket = await repo.createTicket({
-        ticketNumber: "TCK-001",
-        studentUserId: "student-1",
-        categoryId: "tech",
-        subject: "Course Access",
-        description: "Cannot access lesson 3",
-        priority: "medium",
-        ticketStatus: "open",
+        ticketNumber: "TCK-001", studentUserId: "301", categoryId: "3", subject: "Course Access",
+        description: "Cannot access lesson 3", priority: "medium", ticketStatus: "open",
       });
-      assert.equal(insertedTicket, true);
-      assert.equal(ticket.ticketNumber, "TCK-001");
+      assert.doesNotMatch(insertedTicket, /\(\s*SupportTicketId/, "the id is an identity");
+      assert.equal(ticket.id, "501");
+      assert.equal(ticket.categoryName, "Technical");
 
-      const reply = await repo.addReply({
-        ticketId: ticket.id,
-        repliedByUserId: "student-1",
-        replyText: "Still having issues.",
-        isInternal: false,
-      });
-      assert.equal(insertedReply, true);
-      assert.equal(reply.replyText, "Still having issues.");
-
-      const setting = await repo.updateSetting("app_name", "Nexelvoria Live", "admin-1");
-      assert.equal(updatedSetting, true);
-      assert.equal(setting.settingValue, "Nexelvoria Live");
+      const reply = await repo.addReply(
+        { ticketId: ticket.id, repliedByUserId: "301", replyText: "Still having issues.", isInternal: false },
+        { staffReply: false },
+      );
+      assert.doesNotMatch(insertedReply, /\(\s*TicketReplyId/);
+      assert.equal(reply.id, "601");
     });
   });
 });

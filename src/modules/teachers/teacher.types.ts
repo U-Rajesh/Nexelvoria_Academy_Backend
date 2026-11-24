@@ -27,8 +27,11 @@ export interface Teacher extends User {
   assignedCourseIds: EntityId[];
   assignedBatchIds: EntityId[];
 
-  /** Aggregate rating shown in the UI. Derivation rule is unconfirmed. */
-  rating: number;
+  /**
+   * Aggregate rating shown in the UI. The derivation rule is unconfirmed and
+   * no column stores it, so the SQL Server adapter never returns one.
+   */
+  rating?: number | undefined;
 }
 
 /**
@@ -95,7 +98,10 @@ export interface AttendanceItem {
   id: string;
   classSessionId: string;
   studentUserId: string;
-  status: "present" | "absent" | "late" | "excused";
+  /** BR-010: Present / Absent / Leave. A stored value outside BR-010 is reported as "unrecognised", never as present. */
+  status: "present" | "absent" | "leave" | "unrecognised";
+  /** The stored AttendanceStatus when it is outside BR-010. */
+  storedStatus?: string | undefined;
   remarks?: string | undefined;
   markedAt: string;
   markedByUserId: string;

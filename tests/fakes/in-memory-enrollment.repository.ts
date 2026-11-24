@@ -1,6 +1,6 @@
 import type { PaginatedResult, PaginationQuery } from "../../src/contracts/api.contract";
 import type { EntityId } from "../../src/contracts/identifier.contract";
-import type { EnrollmentRepository } from "../../src/modules/enrollments/enrollment.repository";
+import { BatchFullError, type EnrollmentRepository } from "../../src/modules/enrollments/enrollment.repository";
 import type {
   CreateEnrollmentInput,
   Enrollment,
@@ -16,6 +16,7 @@ export class InMemoryEnrollmentRepository implements EnrollmentRepository {
 
   reset(): void {
     this.store.reset();
+    this.statusHistory = [];
   }
 
   seed(enrollment: Enrollment): Enrollment {
@@ -67,6 +68,9 @@ export class InMemoryEnrollmentRepository implements EnrollmentRepository {
     return paginate(rows, pagination);
   }
 
+  /** D6: NXA_Batches.Capacity per batch (the harness reads the admin fake's batches); null = no limit. */
+  batchCapacity?: (batchId: string) => number | null | undefined;
+
   async create(input: CreateEnrollmentInput): Promise<Enrollment> {
     const existing = await this.findByStudentAndCourse(input.studentId, input.courseId);
 
@@ -74,8 +78,16 @@ export class InMemoryEnrollmentRepository implements EnrollmentRepository {
       throw new DuplicateRecordError("enrollment", "studentId+courseId", input.studentId);
     }
 
+    const { enforceBatchCapacity, ...fields } = input;
+    if (enforceBatchCapacity && input.batchId) {
+      // Mirrors the SQL adapter: every status except cancelled counts.
+      const capacity = this.batchCapacity?.(String(input.batchId));
+      const enrolled = this.store.all().filter((e) => e.batchId === input.batchId && e.status !== "cancelled").length;
+      if (capacity !== null && capacity !== undefined && enrolled >= capacity) throw new BatchFullError(String(input.batchId), capacity);
+    }
+
     return this.store.set({
-      ...input,
+      ...fields,
       id: this.store.nextId(),
       enrolledAt: new Date().toISOString(),
       progressPercentage: 0,
@@ -84,8 +96,24 @@ export class InMemoryEnrollmentRepository implements EnrollmentRepository {
     });
   }
 
-  async setStatus(id: EntityId, status: EnrollmentStatus): Promise<Enrollment> {
+  /** Stands in for NXA_EnrollmentStatusHistory (written by setStatus). */
+  statusHistory: Array<{ enrollmentId: string; oldStatus: string; newStatus: string; changedByUserId: string | null; reason?: string | undefined }> = [];
+
+  async setStatus(
+    id: EntityId,
+    status: EnrollmentStatus,
+    history?: { changedByUserId: string | null; reason?: string | undefined },
+  ): Promise<Enrollment> {
     const existing = this.store.getOrThrow(id);
+    // Mirrors the SQL adapter: a no-op writes nothing.
+    if (existing.status === status) return existing;
+    this.statusHistory.push({
+      enrollmentId: id,
+      oldStatus: existing.status,
+      newStatus: status,
+      changedByUserId: history?.changedByUserId ?? null,
+      reason: history?.reason,
+    });
 
     return this.store.set({
       ...existing,

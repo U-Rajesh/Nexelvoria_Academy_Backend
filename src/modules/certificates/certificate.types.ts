@@ -27,9 +27,19 @@ export interface CertificateEligibility {
   reasons: string[];
 }
 
+/**
+ * What anonymous verification may see (SEC API authorization): the facts
+ * printed on the certificate. Internal ids, the verification token and the
+ * issuing user are never returned publicly.
+ */
+export type PublicCertificateView = Pick<
+  CertificateRecord,
+  "certificateNumber" | "studentNameAtIssue" | "courseNameAtIssue" | "attendancePercentage" | "certificateStatus" | "issuedAt" | "revokedAt" | "revocationReason"
+>;
+
 export interface CertificateVerificationResult {
   isValid: boolean;
-  certificate?: CertificateRecord | undefined;
+  certificate?: PublicCertificateView | undefined;
   message: string;
   verificationDate: string;
 }

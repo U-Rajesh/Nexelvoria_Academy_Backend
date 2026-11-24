@@ -7,6 +7,10 @@ import { logger } from "../../utils/logger";
 import { describeError } from "../../utils/redact";
 import { MOBILE_PATTERN, loginSchema } from "./auth.validation";
 import { issueVerificationTicket } from "./token.service";
+import { decideStudentAccess } from "../students/student-access";
+
+/** Consecutive failed sign-ins before the credential is locked (the value the app is wired with). */
+export const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 import type { CredentialRepository } from "./credential.repository";
 import type { ConditionalResetResult, CredentialRecord } from "./credential.types";
 import { isCredentialLocked } from "./credential.types";
@@ -224,7 +228,7 @@ export interface LoginServiceDeps {
    * `SystemConfig.security.maxFailedLogins`. Injected rather than read here
    * so the policy has one owner.
    */
-  maxFailedLoginAttempts: number;
+  maxFailedLoginAttempts: number | (() => Promise<number>);
 }
 
 /** The ONLY status permitted to sign in. */
@@ -353,6 +357,58 @@ const resolvePending = async (
   return { reason: "account_pending" };
 };
 
+/**
+ * Whether this account may sign in at all, and why not.
+ *
+ * STUDENTS (CL-001): decided by `decideStudentAccess`, the same rule the
+ * per-request authorization uses. A student with a verified email may sign
+ * in while Admin approval is pending (limited access) and after approval -
+ * approval replaces the former separate activation step. Suspended,
+ * deactivated, rejected and unverified students are refused.
+ *
+ * Everyone else: the account must be `active`, as before.
+ */
+const accountRefusal = async (
+  user: User,
+  students: StudentRepository | undefined,
+): Promise<PendingOutcome | null> => {
+  if (user.role === "student" && students !== undefined) {
+    let student;
+    try {
+      student = await students.findById(user.id);
+    } catch (err) {
+      logger.error("login: student access could not be established; refusing", {
+        userId: user.id,
+        errorType: describeError(err),
+      });
+      return { reason: "account_pending" };
+    }
+
+    const decision = decideStudentAccess({
+      status: user.status,
+      student: student === null ? null : { adminApprovalStatus: student.adminApprovalStatus, isEmailVerified: student.isEmailVerified },
+    });
+    if (decision.allowed) return null;
+
+    switch (decision.reason) {
+      case "suspended":
+        return { reason: "account_suspended" };
+      case "deactivated":
+        return { reason: "account_deactivated" };
+      case "email_unverified":
+        return { reason: "account_pending_verification", verificationTicket: issueVerificationTicket(user.id).ticket };
+      default:
+        // Rejected, or no usable student profile. Not disclosed further.
+        logger.info("login refused: student account not permitted", { userId: user.id, reason: decision.reason });
+        return { reason: "account_pending" };
+    }
+  }
+
+  const base = statusRefusal(user.status);
+  if (base === null) return null;
+  return base === "account_pending" ? resolvePending(user.id, students) : { reason: base };
+};
+
 export interface LoginService {
   login(input: unknown, client?: LoginClientContext): Promise<LoginResult>;
 }
@@ -406,9 +462,24 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
    * A read failure is fail-closed: if the state cannot be established, the
    * login is refused rather than granted on a stale snapshot.
    */
+  /**
+   * D7: the threshold in force for this sign-in, read once. A read failure
+   * falls back to the current default rather than blocking sign-in.
+   */
+  const lockoutThreshold = async (): Promise<number> => {
+    if (typeof deps.maxFailedLoginAttempts === "number") return deps.maxFailedLoginAttempts;
+    try {
+      return await deps.maxFailedLoginAttempts();
+    } catch (err) {
+      logger.error("lockout threshold could not be read; using the default", { errorType: describeError(err) });
+      return MAX_FAILED_LOGIN_ATTEMPTS;
+    }
+  };
+
   const revalidate = async (
     userId: EntityId,
     acceptableHashes: ReadonlySet<string>,
+    threshold: number,
   ): Promise<GateResult> => {
     let freshUser: User | null;
     let freshCredential: CredentialRecord | null;
@@ -442,7 +513,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       return { ok: false, reason: "password_changed_concurrently" };
     }
 
-    if (isCredentialLocked(freshCredential, deps.maxFailedLoginAttempts)) {
+    if (isCredentialLocked(freshCredential, threshold)) {
       // Covers a concurrent fifth failed attempt, and a failed counter
       // reset that left an authoritative locked state in place.
       logger.warn("login refused: credential locked during login", {
@@ -453,12 +524,8 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       return { ok: false, reason: "account_locked" };
     }
 
-    const baseStatusFailure = statusRefusal(freshUser.status);
-    const pending =
-      baseStatusFailure === "account_pending"
-        ? await resolvePending(freshUser.id, deps.students)
-        : null;
-    const statusFailure = pending === null ? baseStatusFailure : pending.reason;
+    const pending = await accountRefusal(freshUser, deps.students);
+    const statusFailure = pending === null ? null : pending.reason;
 
     if (statusFailure !== null) {
       logger.warn("login refused: account status changed during login", {
@@ -486,6 +553,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       }
 
       const { identifier, password, rememberMe = false } = parsed.data;
+      const threshold = await lockoutThreshold();
 
       // --- 2 + 3. user and credential -----------------------------------
       // Guarded, and it matters twice over. Every OTHER repository call in
@@ -536,7 +604,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
         try {
           const lockout = await deps.credentials.recordFailedAttempt({
             userId: user.id,
-            threshold: deps.maxFailedLoginAttempts,
+            threshold: threshold,
           });
 
           logger.warn("login failed: incorrect password", {
@@ -562,7 +630,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       // Fast rejections on the data already in hand, so a locked or
       // suspended account does not pay for a rehash. The authoritative
       // checks are the gates below.
-      if (isCredentialLocked(credential, deps.maxFailedLoginAttempts)) {
+      if (isCredentialLocked(credential, threshold)) {
         // A correct password does NOT unlock an account. Current policy:
         // locked until a verified password reset or an administrator
         // unlock - no automatic timed unlock (open question Q4a).
@@ -570,13 +638,8 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
         return fail("account_locked");
       }
 
-      const baseSnapshotFailure = statusRefusal(user.status);
-      const snapshotPending =
-        baseSnapshotFailure === "account_pending"
-          ? await resolvePending(user.id, deps.students)
-          : null;
-      const snapshotStatusFailure =
-        snapshotPending === null ? baseSnapshotFailure : snapshotPending.reason;
+      const snapshotPending = await accountRefusal(user, deps.students);
+      const snapshotStatusFailure = snapshotPending === null ? null : snapshotPending.reason;
 
       if (snapshotStatusFailure !== null) {
         logger.warn("login refused: account status", {
@@ -632,7 +695,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       try {
         resetOutcome = await deps.credentials.resetFailedAttemptsIfAuthorized({
           userId: user.id,
-          threshold: deps.maxFailedLoginAttempts,
+          threshold: threshold,
           acceptableHashes: [...acceptableHashes],
         });
       } catch (err) {
@@ -676,7 +739,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       }
 
       // --- 8. gate one: before creating a session ------------------------
-      const preGate = await revalidate(user.id, acceptableHashes);
+      const preGate = await revalidate(user.id, acceptableHashes, threshold);
 
       if (!preGate.ok) {
         // Nothing was created, so there is nothing to clean up.
@@ -745,7 +808,7 @@ export const createLoginService = (deps: LoginServiceDeps): LoginService => {
       // this read is caught here and the session is revoked; anything that
       // commits after it will find our session and revoke it through the
       // mandated revoke-on-change path (§16.3).
-      const finalGate = await revalidate(user.id, acceptableHashes);
+      const finalGate = await revalidate(user.id, acceptableHashes, threshold);
 
       if (!finalGate.ok) {
         await discardSession();

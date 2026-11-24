@@ -10,6 +10,7 @@ import {
   courseStatusBodySchema,
   createCourseBodySchema,
   curriculumBodySchema,
+  prerequisitesBodySchema,
   manageCourseListQuerySchema,
   publicCourseListQuerySchema,
   updateCourseBodySchema,
@@ -64,6 +65,7 @@ export interface CourseRoutesOptions extends CourseServiceDeps {
 }
 
 export const createCourseRoutes = (options: CourseRoutesOptions): Router => {
+  // Management actions are audited by the repository, in the change's transaction.
   const controller = createCourseController(createCourseService(options));
   const router = Router();
 
@@ -93,6 +95,13 @@ export const createCourseRoutes = (options: CourseRoutesOptions): Router => {
     controller.getManagedById,
   );
 
+  router.get(
+    "/manage/:courseId/prerequisites",
+    ...guards,
+    validate({ params: courseIdParamsSchema }),
+    controller.getPrerequisites,
+  );
+
   // --- public ----------------------------------------------------------------
   router.get("/", validate({ query: publicCourseListQuerySchema }), controller.listPublic);
 
@@ -120,6 +129,13 @@ export const createCourseRoutes = (options: CourseRoutesOptions): Router => {
     ...guards,
     validate({ params: courseIdParamsSchema, body: curriculumBodySchema }),
     controller.replaceCurriculum,
+  );
+
+  router.put(
+    "/:courseId/prerequisites",
+    ...guards,
+    validate({ params: courseIdParamsSchema, body: prerequisitesBodySchema }),
+    controller.replacePrerequisites,
   );
 
   router.patch(

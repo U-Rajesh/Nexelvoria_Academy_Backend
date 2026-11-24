@@ -24,6 +24,7 @@ export interface SuperAdminProfile extends AdminProfile {
 export interface BatchRecord {
   id: string;
   courseId: string;
+  courseName?: string | undefined;
   batchCode: string;
   batchName: string;
   startDate?: string | undefined;
@@ -78,98 +79,45 @@ export interface AuditLogRecord {
   details?: string | undefined;
 }
 
+/**
+ * Institute settings as stored in NXA_InstituteSettings. A field the institute
+ * has never saved is absent - no placeholder values are invented.
+ */
 export interface InstituteSettingsRecord {
-  instituteName: string;
-  tagline: string;
-  supportEmail: string;
-  supportPhone: string;
-  whatsappNumber: string;
-  address: string;
+  instituteName?: string | undefined;
+  tagline?: string | undefined;
+  supportEmail?: string | undefined;
+  supportPhone?: string | undefined;
+  whatsappNumber?: string | undefined;
+  address?: string | undefined;
+  /** Institute time zone; Asia/Kolkata unless explicitly saved otherwise. */
   timezone: string;
-  minAttendancePercentage: number;
-  isSmsEnabled: boolean;
-  currencySymbol: string;
+  minAttendancePercentage?: number | undefined;
+  /** D1 / D9: stored, floor 60. */
+  minExamPercentage?: number | undefined;
+  /** D9: starting values for newly created lessons. */
+  defaultLessonSequentialUnlock?: boolean | undefined;
+  defaultLessonDownloadAllowed?: boolean | undefined;
+  /** D7: lockout threshold, 3-10. */
+  maxFailedLoginAttempts?: number | undefined;
+  isSmsEnabled?: boolean | undefined;
+  currencySymbol?: string | undefined;
   gstNumber?: string | undefined;
+  /** CFG-20: enforced by the maintenance guard (Super Admin only). */
+  maintenanceMode?: boolean | undefined;
+  maintenanceMessage?: string | undefined;
   updatedAt?: string | undefined;
 }
 
-export interface SystemConfigRecord {
-  institute: {
-    name: string;
-    code: string;
-    affiliation: string;
-    supportEmail: string;
-    supportPhone: string;
-    whatsappNumber: string;
-    address: string;
-    website: string;
-    gstNumber: string;
-    currency: string;
-    timezone: string;
-  };
-  branding: {
-    logoUrl: string;
-    faviconUrl: string;
-    primaryColor: string;
-    secondaryColor: string;
-    tagline: string;
-    motto: string;
-  };
-  academic: {
-    currentAcademicYear: string;
-    activeTerm: string;
-    isRegistrationOpen: boolean;
-    isCatalogPublic: boolean;
-    maxBatchCapacity: number;
-    minAttendancePercentage: number;
-    assignmentGracePeriodDays: number;
-    passPercentage: number;
-  };
-  paymentGateway: {
-    provider: "razorpay" | "stripe" | "cashfree";
-    keyId: string;
-    keySecretMasked: string;
-    webhookSecretMasked: string;
-    isLiveMode: boolean;
-    autoReconcile: boolean;
-  };
-  emailSms: {
-    smtpHost: string;
-    smtpPort: number;
-    smtpUser: string;
-    smtpPasswordMasked: string;
-    senderName: string;
-    senderEmail: string;
-    isSmsEnabled: boolean;
-    smsProvider: string;
-    smsApiKeyMasked: string;
-  };
-  notifications: {
-    emailOnAdmission: boolean;
-    emailOnPayment: boolean;
-    emailOnExamResult: boolean;
-    smsOnClassReminder: boolean;
-    pushAnnouncements: boolean;
-  };
-  security: {
-    sessionTimeoutMinutes: number;
-    enforceTwoFactor: boolean;
-    maxFailedLogins: number;
-    passwordExpiryDays: number;
-    requireSpecialChars: boolean;
-  };
-  maintenance: {
-    isMaintenanceMode: boolean;
-    message: string;
-    allowedIps: string;
-  };
-}
+export type { SystemConfigStatus } from "./system-config";
 
 export interface RefundRecord {
   id: string;
   refundReference: string;
   transactionId?: string | undefined;
   requestedByUserId: string;
+  requestedByName?: string | undefined;
+  requestedByEmail?: string | undefined;
   amount: number;
   reason: string;
   refundStatus: string;
@@ -178,6 +126,23 @@ export interface RefundRecord {
   approvedAt?: string | undefined;
   approvedBySuperAdminUserId?: string | undefined;
   completedAt?: string | undefined;
+}
+
+/**
+ * A student account created by an admin (ADM-003). It always starts unverified
+ * and unapproved: BR-001 email and mobile verification, then BR-002 approval.
+ */
+export interface AdminCreatedStudent {
+  id: string;
+  name: string;
+  email: string;
+  mobile: string;
+  accountStatus: "pending";
+  approvalStatus: "pending";
+  isEmailVerified: false;
+  isMobileVerified: false;
+  accountState: "pending_verification";
+  createdAt: string;
 }
 
 export interface FinancialOverrideRecord {
@@ -209,6 +174,10 @@ export interface GlobalRoleRecord {
   description: string;
   isSystemRole: boolean;
   isActive: boolean;
+  /**
+   * Always empty until the verified permission catalog and role-permission
+   * mapping are available - never invented.
+   */
   permissions: string[];
   createdAt: string;
 }
@@ -220,28 +189,47 @@ export interface DashboardStats {
   totalCourses: number;
   activeBatches: number;
   totalTeachers: number;
-  totalRevenueINR: number;
+  /**
+   * `null` means "not available": the metric's source table could not be read
+   * or no data source / approved formula exists. Never a placeholder number.
+   */
+  totalRevenueINR: number | null;
+  /** Collected revenue since 1 April of the current Indian financial year (IST). */
+  revenueFinancialYearINR: number | null;
+  /** e.g. "FY 2026-27". */
+  financialYearLabel: string;
   pendingFeesINR: number;
-  certificatesIssued: number;
-  placementRate: number;
-  activePlacements: number;
-  supportTicketsCount: number;
-  systemAlertsCount: number;
+  certificatesIssued: number | null;
+  /** D15 placement rate % (unrounded) for `placementRatePeriod`; null for an empty cohort. */
+  placementRate: number | null;
+  /** IST calendar dates the placement rate covers (current financial year to date). */
+  placementRatePeriod?: { from: string; to: string };
+  placementCohort?: { completedStudents: number; placedStudents: number };
+  /** Open job postings. */
+  activePlacements: number | null;
+  supportTicketsCount: number | null;
+  /** D15: total of the open action queues in `systemAlerts`. */
+  systemAlertsCount: number | null;
+  systemAlerts?: { pendingStudentApprovals: number; pendingRefundRequests: number; pendingFinancialOverrides: number };
   totalEnrollments: number;
-  placementsCount: number;
+  placementsCount: number | null;
 }
 
 export interface SuperAdminDashboardStats {
-  totalRevenueYTD: number;
-  monthlyRecurringRevenue: number;
+  /** Collected revenue since 1 April of the current Indian financial year (IST). */
+  totalRevenueYTD: number | null;
+  /** e.g. "FY 2026-27". */
+  financialYearLabel: string;
+  /** Collected revenue since the first day of the current month. */
+  revenueThisMonth: number | null;
   totalActiveStudents: number;
   totalFacultyMembers: number;
   totalAdminAccounts: number;
-  pendingFinancialOverrides: number;
-  pendingRefundRequests: number;
-  systemHealthScore: number;
-  criticalSecurityAlerts: number;
+  pendingFinancialOverrides: number | null;
+  pendingRefundRequests: number | null;
+  systemHealthScore: number | null;
+  criticalSecurityAlerts: number | null;
   activeCourseBatches: number;
-  certificatesAwaitingSignoff: number;
-  dataIntegrityStatus: "HEALTHY" | "DEGRADED" | "CRITICAL";
+  certificatesAwaitingSignoff: number | null;
+  dataIntegrityStatus: "HEALTHY" | "DEGRADED" | "CRITICAL" | null;
 }

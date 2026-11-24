@@ -1,6 +1,6 @@
 import { Router, type RequestHandler } from "express";
 
-import { requireStudent } from "../../middleware/authorize.middleware";
+import { requireStudent, requireStudentAllowingLimited } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
 import { createEnrollmentController } from "./enrollment.controller";
 import { createEnrollmentService, type EnrollmentServiceDeps } from "./enrollment.service";
@@ -19,7 +19,14 @@ export const createEnrollmentRoutes = (options: EnrollmentRoutesOptions): Router
       ? [requireStudent]
       : [options.authenticate, requireStudent];
 
-  router.get("/me", ...studentGuards, controller.getMyEnrollments);
+  // CL-001 allowlist: also open to students whose approval is pending (limited access).
+  const limitedStudentGuards: RequestHandler[] =
+    options.authenticate === undefined
+      ? [requireStudentAllowingLimited]
+      : [options.authenticate, requireStudentAllowingLimited];
+
+  router.get("/me", ...limitedStudentGuards, controller.getMyEnrollments);
+  // Selecting a course requires Admin approval (BR-002): default guard.
   router.post(
     "/",
     ...studentGuards,

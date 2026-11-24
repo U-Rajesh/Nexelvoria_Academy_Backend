@@ -8,6 +8,8 @@ import {
   DuplicateRecordError,
   RecordNotFoundError,
 } from "../../repositories/repository.errors";
+import { writeAuditLog } from "../admin/sqlserver-admin.repository";
+import { TeacherAccessError, TeacherRuleError } from "./teacher.repository";
 import { getSqlServerPool } from "../../db/sqlserver.pool";
 import type { TeacherRepository } from "./teacher.repository";
 import type {
@@ -27,13 +29,22 @@ import type {
   UpdateTeacherInput,
 } from "./teacher.types";
 
+/**
+ * A teacher is a user holding the 'teacher' role (NXA_UserRoles -> NXA_Roles).
+ * NXA_Users has no Role column.
+ */
+const IS_TEACHER = `EXISTS (
+  SELECT 1 FROM dbo.NXA_UserRoles ur
+  JOIN dbo.NXA_Roles r ON r.RoleId = ur.RoleId
+  WHERE ur.UserId = u.UserId AND LOWER(r.RoleCode) = 'teacher'
+)`;
+
 interface TeacherRow {
   UserId: number | bigint | string;
   FullName: string;
   Email: string;
   MobileNumber: string;
   AccountStatus: string;
-  AvatarUrl: string | null;
   UserCreatedAt: Date | string;
   TeacherProfileId: number | bigint | string | null;
   Specialization: string | null;
@@ -70,14 +81,13 @@ const mapRowToTeacher = (row: TeacherRow): Teacher => {
       row.UserCreatedAt instanceof Date
         ? row.UserCreatedAt.toISOString()
         : String(row.UserCreatedAt),
-    ...(row.AvatarUrl ? { avatarUrl: row.AvatarUrl } : {}),
-    specialization: row.Specialization ?? "General",
+    // NXA_TeacherProfiles columns as stored; nothing is invented when empty.
+    specialization: row.Specialization ?? "",
     experienceYears: row.ExperienceYears ? Number(row.ExperienceYears) : 0,
     bio: row.Bio ?? "",
     qualifications: row.Qualification ?? "",
     assignedCourseIds,
     assignedBatchIds,
-    rating: 4.8,
   };
 
   return teacher;
@@ -108,7 +118,6 @@ export class SqlServerTeacherRepository implements TeacherRepository {
         u.Email,
         u.MobileNumber,
         u.AccountStatus,
-        u.AvatarUrl,
         u.CreatedAt AS UserCreatedAt,
         tp.TeacherProfileId,
         tp.Specialization,
@@ -128,7 +137,7 @@ export class SqlServerTeacherRepository implements TeacherRepository {
         ) AS AssignedBatchIds
       FROM dbo.NXA_Users u
       LEFT JOIN dbo.NXA_TeacherProfiles tp ON tp.UserId = u.UserId
-      WHERE u.UserId = @userId
+      WHERE u.UserId = @userId AND u.DeletedAt IS NULL AND ${IS_TEACHER}
     `);
 
     if (result.recordset.length === 0 || !result.recordset[0]) {
@@ -150,7 +159,6 @@ export class SqlServerTeacherRepository implements TeacherRepository {
         u.Email,
         u.MobileNumber,
         u.AccountStatus,
-        u.AvatarUrl,
         u.CreatedAt AS UserCreatedAt,
         tp.TeacherProfileId,
         tp.Specialization,
@@ -170,7 +178,7 @@ export class SqlServerTeacherRepository implements TeacherRepository {
         ) AS AssignedBatchIds
       FROM dbo.NXA_Users u
       LEFT JOIN dbo.NXA_TeacherProfiles tp ON tp.UserId = u.UserId
-      WHERE LOWER(u.Email) = @email
+      WHERE u.NormalizedEmail = @email AND u.DeletedAt IS NULL AND ${IS_TEACHER}
     `);
 
     if (result.recordset.length === 0 || !result.recordset[0]) {
@@ -200,7 +208,7 @@ export class SqlServerTeacherRepository implements TeacherRepository {
   ): Promise<PaginatedResult<Teacher>> {
     const pool = await this.getPool();
     const req = pool.request();
-    const conditions: string[] = ["u.Role = 'teacher'"];
+    const conditions: string[] = ["u.DeletedAt IS NULL", IS_TEACHER];
 
     if (filter.status) {
       req.input("status", sql.VarChar(20), filter.status.toUpperCase());
@@ -240,7 +248,6 @@ export class SqlServerTeacherRepository implements TeacherRepository {
         u.Email,
         u.MobileNumber,
         u.AccountStatus,
-        u.AvatarUrl,
         u.CreatedAt AS UserCreatedAt,
         tp.TeacherProfileId,
         tp.Specialization,
@@ -276,62 +283,14 @@ export class SqlServerTeacherRepository implements TeacherRepository {
     };
   }
 
-  async create(input: CreateTeacherInput): Promise<Teacher> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("name", sql.NVarChar(200), input.name.trim());
-    req.input("email", sql.NVarChar(255), input.email.trim().toLowerCase());
-    req.input("mobile", sql.VarChar(20), input.mobile.trim());
-    req.input("spec", sql.NVarChar(200), input.specialization ?? "General");
-    req.input("exp", sql.Decimal(4, 1), input.experienceYears ?? 0);
-    req.input("qual", sql.NVarChar(200), input.qualifications ?? "");
-    req.input("bio", sql.NVarChar(sql.MAX), input.bio ?? "");
-
-    try {
-      const tx = pool.transaction();
-      await tx.begin();
-      try {
-        const uReq = tx.request();
-        uReq.input("name", sql.NVarChar(200), input.name.trim());
-        uReq.input("email", sql.NVarChar(255), input.email.trim().toLowerCase());
-        uReq.input("mobile", sql.VarChar(20), input.mobile.trim());
-
-        const uRes = await uReq.query<{ UserId: number | bigint }>(`
-          INSERT INTO dbo.NXA_Users (FullName, Email, MobileNumber, Role, AccountStatus, CreatedAt)
-          OUTPUT inserted.UserId
-          VALUES (@name, @email, @mobile, 'teacher', 'active', SYSUTCDATETIME())
-        `);
-        const userId = uRes.recordset[0]?.UserId;
-
-        const tpReq = tx.request();
-        tpReq.input("userId", sql.BigInt, userId);
-        tpReq.input("spec", sql.NVarChar(200), input.specialization ?? "General");
-        tpReq.input("exp", sql.Decimal(4, 1), input.experienceYears ?? 0);
-        tpReq.input("qual", sql.NVarChar(200), input.qualifications ?? "");
-        tpReq.input("bio", sql.NVarChar(sql.MAX), input.bio ?? "");
-
-        await tpReq.query(`
-          INSERT INTO dbo.NXA_TeacherProfiles (UserId, Specialization, ExperienceYears, Qualification, Bio, IsActive, CreatedAt)
-          VALUES (@userId, @spec, @exp, @qual, @bio, 1, SYSUTCDATETIME())
-        `);
-
-        await tx.commit();
-        const created = await this.findById(String(userId));
-        if (!created) throw new Error("Failed to load created teacher");
-        return created;
-      } catch (err) {
-        await tx.rollback();
-        throw err;
-      }
-    } catch (err: unknown) {
-      if (err instanceof Error && "number" in err) {
-        const sqlNum = (err as { number: number }).number;
-        if (sqlNum === 2601 || sqlNum === 2627) {
-          throw new DuplicateRecordError("teacher", "email", input.email);
-        }
-      }
-      throw err;
-    }
+  /**
+   * Not supported here: a teacher account needs a password hash, the
+   * 'teacher' role in NXA_UserRoles and a profile, which the Admin flow
+   * (POST /admin/teachers, SqlServerAdminRepository) creates in one
+   * transaction. NXA_Users has no Role column. No route calls this method.
+   */
+  async create(_input: CreateTeacherInput): Promise<Teacher> {
+    throw new Error("Teacher accounts are created through the Admin teacher endpoint (POST /admin/teachers).");
   }
 
   async update(id: EntityId, input: UpdateTeacherInput): Promise<Teacher> {
@@ -667,7 +626,7 @@ export class SqlServerTeacherRepository implements TeacherRepository {
   async recordAttendanceSession(
     teacherId: EntityId,
     session: { batchId: string; courseId?: string; sessionTitle: string; startsAt?: string; endsAt?: string },
-    records: Array<{ studentUserId: string; status: "present" | "absent" | "late" | "excused"; remarks?: string }>,
+    records: Array<{ studentUserId: string; status: "present" | "absent" | "leave"; remarks?: string }>,
   ): Promise<ClassSessionRecord> {
     const pool = await this.getPool();
     const tx = pool.transaction();
@@ -682,7 +641,9 @@ export class SqlServerTeacherRepository implements TeacherRepository {
         const bRes = await bReq.query<{ CourseId: number | bigint }>(
           `SELECT CourseId FROM dbo.NXA_Batches WHERE BatchId = @bId`
         );
-        courseId = bRes.recordset[0]?.CourseId ? String(bRes.recordset[0].CourseId) : "1";
+        // The batch must exist: no course id is ever assumed.
+        if (!bRes.recordset[0]?.CourseId) throw new RecordNotFoundError("batch", session.batchId);
+        courseId = String(bRes.recordset[0].CourseId);
       }
 
       const sReq = tx.request();
@@ -838,17 +799,14 @@ export class SqlServerTeacherRepository implements TeacherRepository {
       }
 
       if (r.AttendanceRecordId) {
-        const rawStatus = (r.AttendanceStatus ?? "present").toLowerCase();
-        const status: "present" | "absent" | "late" | "excused" =
-          rawStatus === "absent" || rawStatus === "late" || rawStatus === "excused"
-            ? rawStatus
-            : "present";
+        const { status, storedStatus } = br010Status(r.AttendanceStatus);
 
         sessionMap.get(sId)!.records.push({
           id: String(r.AttendanceRecordId),
           classSessionId: sId,
           studentUserId: String(r.StudentUserId),
           status,
+          ...(storedStatus ? { storedStatus } : {}),
           ...(r.Remarks ? { remarks: r.Remarks } : {}),
           markedAt: r.MarkedAt?.toISOString() ?? new Date().toISOString(),
           markedByUserId: teacherId,
@@ -880,17 +838,14 @@ export class SqlServerTeacherRepository implements TeacherRepository {
     `);
 
     return result.recordset.map((r) => {
-      const rawStatus = (r.AttendanceStatus ?? "present").toLowerCase();
-      const status: "present" | "absent" | "late" | "excused" =
-        rawStatus === "absent" || rawStatus === "late" || rawStatus === "excused"
-          ? rawStatus
-          : "present";
+      const { status, storedStatus } = br010Status(r.AttendanceStatus);
 
       return {
         id: String(r.AttendanceRecordId),
         classSessionId: String(r.ClassSessionId),
         studentUserId: String(r.StudentUserId),
         status,
+        ...(storedStatus ? { storedStatus } : {}),
         ...(r.Remarks ? { remarks: r.Remarks } : {}),
         markedAt: r.MarkedAt.toISOString(),
         markedByUserId: String(r.MarkedByUserId),
@@ -1071,65 +1026,106 @@ export class SqlServerTeacherRepository implements TeacherRepository {
     };
   }
 
+  /**
+   * ASM-012: every evaluation is a new version (never an overwrite), written
+   * with its audit row in one transaction. The teacher must be actively
+   * allocated to the assignment's batch (or course when it has no batch) or be
+   * its author; marks must be within the assignment's maximum.
+   */
   async evaluateSubmission(
     submissionId: EntityId,
     evaluatorUserId: EntityId,
     marks: number,
     feedback?: string,
   ): Promise<AssignmentSubmissionRecord> {
+    if (!/^\d{1,19}$/.test(String(submissionId))) throw new RecordNotFoundError("submission", String(submissionId));
     const pool = await this.getPool();
     const tx = pool.transaction();
     await tx.begin();
-
     try {
-      const eReq = tx.request();
-      eReq.input("subId", sql.BigInt, submissionId);
-      eReq.input("evaluatorId", sql.BigInt, evaluatorUserId);
-      eReq.input("marks", sql.Decimal(6, 2), marks);
-      eReq.input("feedback", sql.NVarChar(sql.MAX), feedback ?? null);
+      const cur = await tx
+        .request()
+        .input("subId", sql.BigInt, submissionId)
+        .input("teacherId", sql.BigInt, evaluatorUserId)
+        .query<{ MaximumMarks: number | string | null; NextVersion: number; Allowed: number }>(`
+          SELECT a.MaximumMarks,
+                 ISNULL((SELECT MAX(er.EvaluationVersion) FROM dbo.NXA_EvaluationRecords er WITH (UPDLOCK, HOLDLOCK)
+                         WHERE er.AssignmentSubmissionId = s.AssignmentSubmissionId), 0) + 1 AS NextVersion,
+                 CASE WHEN a.CreatedByTeacherUserId = @teacherId OR EXISTS (
+                   SELECT 1 FROM dbo.NXA_TeacherAllocations ta
+                   WHERE ta.TeacherUserId = @teacherId AND ta.IsActive = 1
+                     AND ((a.BatchId IS NOT NULL AND ta.BatchId = a.BatchId) OR (a.BatchId IS NULL AND ta.CourseId = a.CourseId))
+                 ) THEN 1 ELSE 0 END AS Allowed
+          FROM dbo.NXA_AssignmentSubmissions s WITH (UPDLOCK, HOLDLOCK)
+          JOIN dbo.NXA_Assignments a ON a.AssignmentId = s.AssignmentId
+          WHERE s.AssignmentSubmissionId = @subId
+        `);
+      const row = cur.recordset[0];
+      if (!row) throw new RecordNotFoundError("submission", String(submissionId));
+      if (!Number(row.Allowed)) throw new TeacherAccessError("You are not allocated to this assignment's batch.");
+      const max = Number(row.MaximumMarks);
+      if (!(marks >= 0) || (Number.isFinite(max) && marks > max)) {
+        throw new TeacherRuleError("MARKS_OUT_OF_RANGE", `Marks must be between 0 and ${Number.isFinite(max) ? max : "the maximum"}.`);
+      }
 
-      await eReq.query(`
-        INSERT INTO dbo.NXA_EvaluationRecords (
-          AssessmentType,
-          AssignmentSubmissionId,
-          EvaluatedByUserId,
-          MarksAwarded,
-          Feedback,
-          EvaluationVersion,
-          EvaluatedAt
-        )
-        VALUES (
-          'assignment',
-          @subId,
-          @evaluatorId,
-          @marks,
-          @feedback,
-          1,
-          SYSUTCDATETIME()
-        );
+      await tx
+        .request()
+        .input("subId", sql.BigInt, submissionId)
+        .input("evaluatorId", sql.BigInt, evaluatorUserId)
+        .input("marks", sql.Decimal(8, 2), marks)
+        .input("feedback", sql.NVarChar(sql.MAX), feedback ?? null)
+        .input("version", sql.Int, row.NextVersion)
+        .query(`
+          INSERT INTO dbo.NXA_EvaluationRecords (AssessmentType, AssignmentSubmissionId, EvaluatedByUserId, MarksAwarded, Feedback, EvaluationVersion, EvaluatedAt)
+          VALUES ('assignment', @subId, @evaluatorId, @marks, @feedback, @version, SYSUTCDATETIME());
 
-        UPDATE dbo.NXA_AssignmentSubmissions
-        SET SubmissionStatus = 'EVALUATED'
-        WHERE AssignmentSubmissionId = @subId;
-      `);
-
+          UPDATE dbo.NXA_AssignmentSubmissions SET SubmissionStatus = 'EVALUATED' WHERE AssignmentSubmissionId = @subId;
+        `);
+      await writeAuditLog(tx.request(), {
+        actorUserId: String(evaluatorUserId),
+        actionType: "EVALUATE_SUBMISSION",
+        moduleCode: "ASSESSMENT_MGMT",
+        entityName: "AssignmentSubmission",
+        entityId: String(submissionId),
+        newValues: JSON.stringify({ marksAwarded: marks, evaluationVersion: row.NextVersion }),
+      });
       await tx.commit();
-
-      return {
-        id: submissionId,
-        assignmentId: "1",
-        studentUserId: "1",
-        submissionType: "github",
-        status: "evaluated",
-        submittedAt: new Date().toISOString(),
-        marksAwarded: marks,
-        ...(feedback ? { feedback } : {}),
-        evaluatedAt: new Date().toISOString(),
-      };
     } catch (err) {
-      await tx.rollback();
+      try {
+        await tx.rollback();
+      } catch {
+        // the original error is the one to report
+      }
       throw err;
     }
+
+    const r = await pool
+      .request()
+      .input("subId", sql.BigInt, submissionId)
+      .query(`
+        SELECT s.AssignmentSubmissionId, s.AssignmentId, s.StudentUserId, s.SubmissionType, s.GitHubUrl, s.TextContent, s.ObjectKey,
+               s.SubmissionStatus, s.SubmittedAt, ev.MarksAwarded, ev.Feedback, ev.EvaluatedAt
+        FROM dbo.NXA_AssignmentSubmissions s
+        OUTER APPLY (SELECT TOP 1 er.MarksAwarded, er.Feedback, er.EvaluatedAt FROM dbo.NXA_EvaluationRecords er
+                     WHERE er.AssignmentSubmissionId = s.AssignmentSubmissionId ORDER BY er.EvaluationVersion DESC, er.EvaluationRecordId DESC) ev
+        WHERE s.AssignmentSubmissionId = @subId
+      `);
+    const x = r.recordset[0];
+    if (!x) throw new RecordNotFoundError("submission", String(submissionId));
+    return {
+      id: String(x.AssignmentSubmissionId),
+      assignmentId: String(x.AssignmentId),
+      studentUserId: String(x.StudentUserId),
+      submissionType: String(x.SubmissionType ?? "").toLowerCase(),
+      ...(x.GitHubUrl ? { githubUrl: x.GitHubUrl } : {}),
+      ...(x.TextContent ? { textContent: x.TextContent } : {}),
+      ...(x.ObjectKey ? { objectKey: x.ObjectKey } : {}),
+      status: String(x.SubmissionStatus ?? "").toLowerCase(),
+      submittedAt: new Date(x.SubmittedAt).toISOString(),
+      ...(x.MarksAwarded != null ? { marksAwarded: Number(x.MarksAwarded) } : {}),
+      ...(x.Feedback ? { feedback: x.Feedback } : {}),
+      ...(x.EvaluatedAt ? { evaluatedAt: new Date(x.EvaluatedAt).toISOString() } : {}),
+    };
   }
 
   async findMaterials(lessonId: EntityId): Promise<LearningMaterialRecord[]> {
@@ -1521,4 +1517,11 @@ export class SqlServerTeacherRepository implements TeacherRepository {
       ...(r.EvaluatedAt ? { evaluatedAt: r.EvaluatedAt.toISOString() } : {}),
     }));
   }
+}
+
+/** BR-010 vocabulary as read back: anything else is flagged, never reported as present. */
+function br010Status(raw: string | null | undefined): { status: "present" | "absent" | "leave" | "unrecognised"; storedStatus?: string } {
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (v === "present" || v === "absent" || v === "leave") return { status: v };
+  return { status: "unrecognised", storedStatus: String(raw ?? "") };
 }

@@ -5,6 +5,7 @@ import type { UserRole, UserStatus } from "../../contracts/user.contract";
 import { getSqlServerPool } from "../../db/sqlserver.pool";
 import { RecordNotFoundError } from "../../repositories/repository.errors";
 import type {
+  AdminCreatedStudent,
   AdminProfile,
   AuditLogRecord,
   BatchRecord,
@@ -15,11 +16,180 @@ import type {
   InstituteSettingsRecord,
   RefundRecord,
   SuperAdminDashboardStats,
-  SystemConfigRecord,
 } from "./admin.types";
-import type { AdminRepository } from "./admin.repository";
+import type { AdminRepository, StaffAudit } from "./admin.repository";
 import type { Student } from "../students/student.types";
 import type { Teacher } from "../teachers/teacher.types";
+import { randomBytes } from "node:crypto";
+
+import { DuplicateRecordError } from "../../repositories/repository.errors";
+import { logger } from "../../utils/logger";
+import { checkCouponUsable, couponDiscountAmount } from "../payments/coupon-rules";
+import { writeEnrollmentStatusHistory, writeFinancialAuditHistory } from "../../db/history-writers";
+import {
+  AdminRuleViolationError,
+  FREE_ACCESS_OVERRIDE_TYPE,
+  type EnrollmentStatusValue,
+  type TransactionalAudit,
+} from "./admin.repository";
+import type { BatchStatusValue } from "./admin.validation";
+import { financialYearLabel, financialYearStart, istMonthStart } from "./reporting-period";
+
+export interface AuditLogInput {
+  actorUserId: EntityId;
+  actionType: string;
+  moduleCode: string;
+  entityName: string;
+  entityId: string;
+  oldValues?: string | undefined;
+  newValues?: string | undefined;
+  ipAddress?: string | undefined;
+  userAgent?: string | undefined;
+  details?: string | undefined;
+}
+
+/**
+ * Inserts one NXA_AuditLogs row using the given request, so callers can write
+ * the audit record inside the same transaction as the change it records
+ * (BR-007 / BR-017: overrides must have audit records). NXA_AuditLogs has no
+ * free-text column, so `details` is preserved in NewValues when no structured
+ * new values are supplied.
+ */
+export const writeAuditLog = async (req: sql.Request, log: AuditLogInput): Promise<string> => {
+  const newValues = log.newValues ?? (log.details ? JSON.stringify({ note: log.details }) : null);
+  req.input("actorId", sql.BigInt, log.actorUserId);
+  req.input("action", sql.VarChar(80), log.actionType);
+  req.input("module", sql.VarChar(50), log.moduleCode);
+  req.input("ename", sql.VarChar(150), log.entityName);
+  req.input("eid", sql.VarChar(100), log.entityId);
+  req.input("oldVal", sql.NVarChar(sql.MAX), log.oldValues ?? null);
+  req.input("newVal", sql.NVarChar(sql.MAX), newValues);
+  req.input("ip", sql.VarChar(45), log.ipAddress ?? null);
+  req.input("ua", sql.NVarChar(500), log.userAgent ?? null);
+
+  const result = await req.query<{ AuditLogId: number | bigint }>(`
+    INSERT INTO dbo.NXA_AuditLogs (
+      ActorUserId, ActionType, ModuleCode, EntityName, EntityId,
+      OldValues, NewValues, IpAddress, UserAgent, CorrelationId, CreatedAt
+    )
+    OUTPUT inserted.AuditLogId
+    VALUES (
+      @actorId, @action, @module, @ename, @eid,
+      @oldVal, @newVal, @ip, @ua, NEWID(), SYSUTCDATETIME()
+    )
+  `);
+  return String(result.recordset[0]?.AuditLogId);
+};
+
+/**
+ * Keys in this schema are BIGINT. A non-numeric id can never match a row, so
+ * it is reported as not-found instead of failing with a conversion error.
+ */
+const requireNumericIds = (ids: Record<string, string | undefined>): void => {
+  for (const [entity, id] of Object.entries(ids)) {
+    if (id !== undefined && !/^[0-9]+$/.test(id)) throw new RecordNotFoundError(entity, id);
+  }
+};
+
+/** Maps stored key/value rows to settings; unset keys stay absent. */
+const toInstituteSettings = (map: Map<string, string>): InstituteSettingsRecord => {
+  const text = (k: string): string | undefined => {
+    const v = map.get(k)?.trim();
+    return v ? v : undefined;
+  };
+  const attendance = text("minAttendancePercentage");
+  const sms = text("isSmsEnabled");
+  const maintenance = text("maintenanceMode");
+  const numberOf = (k: string): number | undefined => {
+    const v = text(k);
+    return v !== undefined && Number.isFinite(Number(v)) ? Number(v) : undefined;
+  };
+  const flag = (k: string): boolean | undefined => {
+    const v = text(k);
+    return v === undefined ? undefined : v === "true";
+  };
+  return {
+    instituteName: text("instituteName"),
+    tagline: text("tagline"),
+    supportEmail: text("supportEmail"),
+    supportPhone: text("supportPhone"),
+    whatsappNumber: text("whatsappNumber"),
+    address: text("address"),
+    timezone: text("timezone") ?? "Asia/Kolkata",
+    minAttendancePercentage: attendance !== undefined && Number.isFinite(Number(attendance)) ? Number(attendance) : undefined,
+    minExamPercentage: numberOf("minExamPercentage"),
+    defaultLessonSequentialUnlock: flag("defaultLessonSequentialUnlock"),
+    defaultLessonDownloadAllowed: flag("defaultLessonDownloadAllowed"),
+    maxFailedLoginAttempts: numberOf("maxFailedLoginAttempts"),
+    isSmsEnabled: sms === undefined ? undefined : sms === "true",
+    currencySymbol: text("currencySymbol"),
+    gstNumber: text("gstNumber"),
+    maintenanceMode: maintenance === undefined ? undefined : maintenance === "true",
+    maintenanceMessage: text("maintenanceMessage"),
+  };
+};
+
+/**
+ * Writes a staff action's audit row on the caller's transaction, so the change
+ * and its audit commit or roll back together (SEC audit logs). Existing
+ * conventions are kept: action / module / entity names and the `details` note.
+ */
+const writeStaffAudit = async (tx: sql.Transaction, audit: StaffAudit | undefined, entityId: string): Promise<void> => {
+  if (!audit) return;
+  await writeAuditLog(tx.request(), {
+    actorUserId: audit.actorUserId,
+    actionType: audit.actionType,
+    moduleCode: audit.moduleCode,
+    entityName: audit.entityName,
+    entityId,
+    details: audit.details,
+  });
+};
+
+/** SQL Server unique constraint / unique index violation (2627 / 2601). */
+const isUniqueViolation = (err: unknown): boolean => {
+  const n = (err as { number?: number; originalError?: { number?: number; info?: { number?: number } } }) ?? {};
+  const code = n.number ?? n.originalError?.number ?? n.originalError?.info?.number;
+  return code === 2627 || code === 2601;
+};
+
+/**
+ * Roles live in NXA_UserRoles -> NXA_Roles.RoleCode; NXA_Users has no Role
+ * column. These fragments mirror the resolution used by login
+ * (sqlserver-user.repository.ts): a user with no role row is a student, and
+ * both `super_admin` and `superadmin` codes denote the super admin.
+ */
+const roleCodeOf = (userAlias: string): string => `COALESCE((
+  SELECT TOP 1 LOWER(r.RoleCode)
+  FROM dbo.NXA_UserRoles ur
+  JOIN dbo.NXA_Roles r ON r.RoleId = ur.RoleId
+  WHERE ur.UserId = ${userAlias}.UserId
+  ORDER BY ur.AssignedAt DESC
+), 'student')`;
+
+const hasRole = (userAlias: string, codes: readonly string[]): string => `EXISTS (
+  SELECT 1
+  FROM dbo.NXA_UserRoles ur
+  JOIN dbo.NXA_Roles r ON r.RoleId = ur.RoleId
+  WHERE ur.UserId = ${userAlias}.UserId
+    AND LOWER(r.RoleCode) IN (${codes.map((c) => `'${c}'`).join(", ")})
+)`;
+
+const ADMIN_ROLE_CODES = ["admin", "super_admin", "superadmin"] as const;
+const TEACHER_ROLE_CODES = ["teacher"] as const;
+
+/** Same normalisation as student registration: country code + local number. */
+const DEFAULT_COUNTRY_CODE = "+91";
+
+const toAdminRole = (code: string | null | undefined): UserRole => {
+  const c = (code ?? "").toLowerCase();
+  return c === "super_admin" || c === "superadmin" ? "super_admin" : "admin";
+};
+
+const toUserStatus = (raw: string | null | undefined): UserStatus => {
+  const s = (raw ?? "").toLowerCase();
+  return s === "active" || s === "suspended" || s === "deactivated" ? s : "pending";
+};
 
 export class SqlServerAdminRepository implements AdminRepository {
   constructor(
@@ -34,28 +204,84 @@ export class SqlServerAdminRepository implements AdminRepository {
       : this.poolOrFactory;
   }
 
+  /**
+   * Runs one KPI query against a table whose live schema is not yet verified.
+   * A failure yields `null` ("not available") and is logged - it never takes
+   * the whole dashboard down and never substitutes an invented number.
+   */
+  private async optionalMetric(
+    label: string,
+    run: (pool: sql.ConnectionPool) => Promise<number | null>,
+  ): Promise<number | null> {
+    try {
+      return await run(await this.getPool());
+    } catch (err) {
+      logger.warn("dashboard metric unavailable", { metric: label, err });
+      return null;
+    }
+  }
+
+  private countMetric(label: string, query: string): Promise<number | null> {
+    return this.optionalMetric(label, async (pool) => {
+      const r = await pool.request().query<{ cnt: number }>(query);
+      return Number(r.recordset[0]?.cnt ?? 0);
+    });
+  }
+
+  /**
+   * Collected revenue: successful gateway transactions plus manually verified
+   * payments, optionally from `since`. Refunds are reported separately
+   * (REP-008), not netted here.
+   */
+  private revenueMetric(label: string, since?: Date): Promise<number | null> {
+    return this.optionalMetric(label, async (pool) => {
+      const req = pool.request();
+      let tFilter = "";
+      let mFilter = "";
+      if (since) {
+        req.input("since", sql.DateTime2, since);
+        tFilter = "AND t.CreatedAt >= @since";
+        mFilter = "AND m.CreatedAt >= @since";
+      }
+      const r = await req.query<{ total: number | null }>(`
+        SELECT
+          ISNULL((SELECT SUM(t.Amount) FROM dbo.NXA_Transactions t
+                  WHERE LOWER(t.TransactionStatus) = 'successful' ${tFilter}), 0)
+          +
+          ISNULL((SELECT SUM(m.Amount) FROM dbo.NXA_ManualPaymentRecords m
+                  WHERE LOWER(m.VerificationStatus) = 'verified' ${mFilter}), 0) AS total
+      `);
+      return Math.round(Number(r.recordset[0]?.total ?? 0));
+    });
+  }
+
   async getDashboardStats(): Promise<DashboardStats> {
     const pool = await this.getPool();
 
-    const [uCounts, cCount, bCount, eCounts, feeStats] = await Promise.all([
-      pool.request().query<{ role: string; status: string; cnt: number }>(`
-        SELECT Role AS role, AccountStatus AS status, COUNT(1) AS cnt
-        FROM dbo.NXA_Users
-        GROUP BY Role, AccountStatus
+    const [uCounts, cCount, bCount, eStats] = await Promise.all([
+      pool.request().query<{ role: string; status: string; approval: string | null; cnt: number }>(`
+        SELECT x.role, x.status, x.approval, COUNT(1) AS cnt
+        FROM (
+          SELECT
+            ${roleCodeOf("u")} AS role,
+            LOWER(u.AccountStatus) AS status,
+            LOWER(sp.ApprovalStatus) AS approval
+          FROM dbo.NXA_Users u
+          LEFT JOIN dbo.NXA_StudentProfiles sp ON sp.UserId = u.UserId
+          WHERE u.DeletedAt IS NULL
+        ) x
+        GROUP BY x.role, x.status, x.approval
       `),
       pool.request().query<{ cnt: number }>(`
         SELECT COUNT(1) AS cnt FROM dbo.NXA_Courses WHERE DeletedAt IS NULL
       `),
       pool.request().query<{ cnt: number }>(`
-        SELECT COUNT(1) AS cnt FROM dbo.NXA_Batches WHERE Status IN ('upcoming', 'ongoing')
+        SELECT COUNT(1) AS cnt FROM dbo.NXA_Batches WHERE LOWER(Status) IN ('upcoming', 'ongoing')
       `),
-      pool.request().query<{ cnt: number }>(`
-        SELECT COUNT(1) AS cnt FROM dbo.NXA_Enrollments
-      `),
-      pool.request().query<{ totalRevenue: number | null; pendingRevenue: number | null }>(`
-        SELECT 
-          SUM(CASE WHEN EnrollmentStatus = 'ACTIVE' THEN FinalAmount ELSE 0 END) AS totalRevenue,
-          SUM(CASE WHEN EnrollmentStatus = 'PENDING' THEN FinalAmount ELSE 0 END) AS pendingRevenue
+      pool.request().query<{ total: number; pendingFees: number | null }>(`
+        SELECT
+          COUNT(1) AS total,
+          SUM(CASE WHEN UPPER(EnrollmentStatus) = 'APPROVED_UNPAID' THEN FinalAmount ELSE 0 END) AS pendingFees
         FROM dbo.NXA_Enrollments
       `),
     ]);
@@ -70,52 +296,105 @@ export class SqlServerAdminRepository implements AdminRepository {
       const status = (r.status ?? "").toLowerCase();
       if (role === "student") {
         totalStudents += Number(r.cnt);
-        if (status === "active") activeStudents += Number(r.cnt);
-        if (status === "pending" || status === "pending_approval") pendingApprovals += Number(r.cnt);
+        // CL-001 decision 2: approval (not a separate activation) gives a
+        // student full access, so "active" means approved and not blocked.
+        if (r.approval === "approved" && (status === "active" || status === "pending")) activeStudents += Number(r.cnt);
+        // Approval is a student-profile fact, not an account status.
+        if ((r.approval ?? "pending") === "pending") pendingApprovals += Number(r.cnt);
       } else if (role === "teacher") {
         totalTeachers += Number(r.cnt);
       }
     }
 
-    const totalRevenueINR = Math.round(Number(feeStats.recordset[0]?.totalRevenue ?? 0));
-    const pendingFeesINR = Math.round(Number(feeStats.recordset[0]?.pendingRevenue ?? 0));
+    const now = new Date();
+    const [totalRevenueINR, revenueFinancialYearINR, certificatesIssued, activePlacements, placementsCount, supportTicketsCount] =
+      await Promise.all([
+        this.revenueMetric("totalRevenueINR"),
+        this.revenueMetric("revenueFinancialYearINR", financialYearStart(now)),
+        this.countMetric(
+          "certificatesIssued",
+          `SELECT COUNT(1) AS cnt FROM dbo.NXA_Certificates WHERE LOWER(CertificateStatus) <> 'revoked'`,
+        ),
+        this.countMetric("activePlacements", `SELECT COUNT(1) AS cnt FROM dbo.NXA_Jobs WHERE LOWER(JobStatus) = 'open'`),
+        this.countMetric("placementsCount", `SELECT COUNT(1) AS cnt FROM dbo.NXA_PlacementRecords`),
+        this.countMetric(
+          "supportTicketsCount",
+          `SELECT COUNT(1) AS cnt FROM dbo.NXA_SupportTickets WHERE LOWER(TicketStatus) IN ('open', 'in_progress')`,
+        ),
+      ]);
 
     return {
       totalStudents,
       activeStudents,
       pendingApprovals,
-      totalCourses: cCount.recordset[0]?.cnt ?? 0,
-      activeBatches: bCount.recordset[0]?.cnt ?? 0,
+      totalCourses: Number(cCount.recordset[0]?.cnt ?? 0),
+      activeBatches: Number(bCount.recordset[0]?.cnt ?? 0),
       totalTeachers,
       totalRevenueINR,
-      pendingFeesINR,
-      certificatesIssued: 0,
-      placementRate: 85,
-      activePlacements: 12,
-      supportTicketsCount: 0,
-      systemAlertsCount: 0,
-      totalEnrollments: eCounts.recordset[0]?.cnt ?? 0,
-      placementsCount: 24,
+      revenueFinancialYearINR,
+      financialYearLabel: financialYearLabel(now),
+      // Fees awaiting payment on approved enrollments (APPROVED_UNPAID).
+      pendingFeesINR: Math.round(Number(eStats.recordset[0]?.pendingFees ?? 0)),
+      certificatesIssued,
+      // No approved placement-rate formula exists in the SRS; not computed.
+      placementRate: null,
+      activePlacements,
+      supportTicketsCount,
+      // No system-alert source exists.
+      systemAlertsCount: null,
+      totalEnrollments: Number(eStats.recordset[0]?.total ?? 0),
+      placementsCount,
     };
+  }
+
+  async getPlacementCohort(range: { fromUtc: Date; toUtc: Date }): Promise<{ completedStudents: number; placedStudents: number }> {
+    const pool = await this.getPool();
+    const r = await pool
+      .request()
+      .input("fromUtc", sql.DateTime2, range.fromUtc)
+      .input("toUtc", sql.DateTime2, range.toUtc)
+      .query<{ completedStudents: number; placedStudents: number }>(`
+        WITH cohort AS (
+          SELECT DISTINCT e.StudentUserId
+          FROM dbo.NXA_Enrollments e
+          WHERE UPPER(e.EnrollmentStatus) = 'COMPLETED' AND e.CompletedAt >= @fromUtc AND e.CompletedAt < @toUtc
+        ),
+        placed AS (
+          SELECT DISTINCT p.StudentUserId FROM dbo.NXA_PlacementRecords p
+        )
+        SELECT
+          (SELECT COUNT(1) FROM cohort) AS completedStudents,
+          (SELECT COUNT(1) FROM cohort c JOIN placed p ON p.StudentUserId = c.StudentUserId) AS placedStudents
+      `);
+    const row = r.recordset[0];
+    return { completedStudents: Number(row?.completedStudents ?? 0), placedStudents: Number(row?.placedStudents ?? 0) };
   }
 
   async getSuperAdminDashboardStats(): Promise<SuperAdminDashboardStats> {
     const pool = await this.getPool();
 
-    const [uCounts, overrides, refunds, batches] = await Promise.all([
+    const [uCounts, batches] = await Promise.all([
       pool.request().query<{ role: string; cnt: number }>(`
-        SELECT Role AS role, COUNT(1) AS cnt
-        FROM dbo.NXA_Users
-        GROUP BY Role
+        SELECT x.role, COUNT(1) AS cnt
+        FROM (
+          SELECT
+            ${roleCodeOf("u")} AS role,
+            LOWER(u.AccountStatus) AS status,
+            CASE WHEN EXISTS (
+              SELECT 1 FROM dbo.NXA_StudentProfiles sp
+              WHERE sp.UserId = u.UserId AND LOWER(sp.ApprovalStatus) = 'approved'
+            ) THEN 1 ELSE 0 END AS approved
+          FROM dbo.NXA_Users u
+          WHERE u.DeletedAt IS NULL
+        ) x
+        -- Staff count when active; students when approved and not suspended or
+        -- deactivated (CL-001 decision 2: approval replaces activation).
+        WHERE (x.role = 'student' AND x.status IN ('active', 'pending') AND x.approved = 1)
+           OR (x.role <> 'student' AND x.status = 'active')
+        GROUP BY x.role
       `),
       pool.request().query<{ cnt: number }>(`
-        SELECT COUNT(1) AS cnt FROM dbo.NXA_EnrollmentOverrides
-      `),
-      pool.request().query<{ cnt: number }>(`
-        SELECT COUNT(1) AS cnt FROM dbo.NXA_Refunds WHERE RefundStatus = 'PENDING'
-      `),
-      pool.request().query<{ cnt: number }>(`
-        SELECT COUNT(1) AS cnt FROM dbo.NXA_Batches WHERE Status = 'ongoing'
+        SELECT COUNT(1) AS cnt FROM dbo.NXA_Batches WHERE LOWER(Status) = 'ongoing'
       `),
     ]);
 
@@ -127,194 +406,241 @@ export class SqlServerAdminRepository implements AdminRepository {
       const role = (r.role ?? "").toLowerCase();
       if (role === "student") totalActiveStudents += Number(r.cnt);
       else if (role === "teacher") totalFacultyMembers += Number(r.cnt);
-      else if (role === "admin" || role === "super_admin") totalAdminAccounts += Number(r.cnt);
+      else if (role === "admin" || role === "super_admin" || role === "superadmin") totalAdminAccounts += Number(r.cnt);
     }
 
+    // Period boundaries in IST; YTD uses the Indian financial year (1 April).
+    const now = new Date();
+
+    const [totalRevenueYTD, revenueThisMonth, pendingFinancialOverrides, pendingRefundRequests] = await Promise.all([
+      this.revenueMetric("totalRevenueYTD", financialYearStart(now)),
+      this.revenueMetric("revenueThisMonth", istMonthStart(now)),
+      // NXA_EnrollmentOverrides.ApprovedByUserId is NOT NULL: an override is
+      // authorized when it is recorded, so none can be pending.
+      Promise.resolve(0),
+      this.countMetric(
+        "pendingRefundRequests",
+        `SELECT COUNT(1) AS cnt FROM dbo.NXA_Refunds WHERE UPPER(RefundStatus) = 'PENDING'`,
+      ),
+    ]);
+
     return {
-      totalRevenueYTD: 2450000,
-      monthlyRecurringRevenue: 380000,
+      totalRevenueYTD,
+      financialYearLabel: financialYearLabel(now),
+      revenueThisMonth,
       totalActiveStudents,
       totalFacultyMembers,
       totalAdminAccounts,
-      pendingFinancialOverrides: overrides.recordset[0]?.cnt ?? 0,
-      pendingRefundRequests: refunds.recordset[0]?.cnt ?? 0,
-      systemHealthScore: 99.4,
-      criticalSecurityAlerts: 0,
-      activeCourseBatches: batches.recordset[0]?.cnt ?? 0,
-      certificatesAwaitingSignoff: 0,
-      dataIntegrityStatus: "HEALTHY",
+      pendingFinancialOverrides,
+      pendingRefundRequests,
+      activeCourseBatches: Number(batches.recordset[0]?.cnt ?? 0),
+      // No monitoring, security-alert, sign-off or integrity source exists yet.
+      systemHealthScore: null,
+      criticalSecurityAlerts: null,
+      certificatesAwaitingSignoff: null,
+      dataIntegrityStatus: null,
     };
+  }
+
+  private mapAdminRow(r: {
+    UserId: number | bigint;
+    FullName: string;
+    Email: string | null;
+    MobileNumber: string | null;
+    RoleCode: string | null;
+    AccountStatus: string;
+    CreatedAt: Date;
+    EmployeeCode: string | null;
+    AdminLevel: string | null;
+  }): AdminProfile {
+    return {
+      id: String(r.UserId),
+      userId: String(r.UserId),
+      name: r.FullName,
+      email: r.Email ?? "",
+      mobile: r.MobileNumber ?? "",
+      role: toAdminRole(r.RoleCode),
+      status: toUserStatus(r.AccountStatus),
+      department: r.AdminLevel ?? "",
+      // Fine-grained permissions have no persisted model yet; never fabricate them.
+      permissions: [],
+      ...(r.EmployeeCode ? { employeeCode: r.EmployeeCode } : {}),
+      ...(r.AdminLevel ? { adminLevel: r.AdminLevel } : {}),
+      createdAt: r.CreatedAt.toISOString(),
+    };
+  }
+
+  private adminSelect(where: string): string {
+    return `
+      SELECT
+        u.UserId,
+        u.FullName,
+        u.Email,
+        u.MobileNumber,
+        ${roleCodeOf("u")} AS RoleCode,
+        u.AccountStatus,
+        u.CreatedAt,
+        ap.EmployeeCode,
+        ap.AdminLevel
+      FROM dbo.NXA_Users u
+      LEFT JOIN dbo.NXA_AdminProfiles ap ON ap.UserId = u.UserId
+      WHERE u.DeletedAt IS NULL AND ${hasRole("u", ADMIN_ROLE_CODES)} AND ${where}
+    `;
   }
 
   async findAdmins(filter?: { search?: string | undefined; status?: string | undefined }): Promise<AdminProfile[]> {
     const pool = await this.getPool();
     const req = pool.request();
-    const conditions: string[] = ["u.Role IN ('admin', 'super_admin')"];
+    const conditions: string[] = ["1=1"];
 
     if (filter?.status) {
-      req.input("status", sql.VarChar(20), filter.status.toUpperCase());
-      conditions.push("UPPER(u.AccountStatus) = @status");
+      req.input("status", sql.VarChar(20), filter.status.toLowerCase());
+      conditions.push("LOWER(u.AccountStatus) = @status");
     }
     if (filter?.search && filter.search.trim() !== "") {
-      req.input("search", sql.NVarChar(150), `%${filter.search.trim()}%`);
+      req.input("search", sql.NVarChar(160), `%${filter.search.trim()}%`);
       conditions.push("(u.FullName LIKE @search OR u.Email LIKE @search)");
     }
 
-    const result = await req.query<{
-      UserId: number | bigint;
-      FullName: string;
-      Email: string;
-      MobileNumber: string;
-      Role: string;
-      AccountStatus: string;
-      CreatedAt: Date;
-      EmployeeCode: string | null;
-      AdminLevel: string | null;
-      IsActive: boolean | null;
-    }>(`
-      SELECT 
-        u.UserId,
-        u.FullName,
-        u.Email,
-        u.MobileNumber,
-        u.Role,
-        u.AccountStatus,
-        u.CreatedAt,
-        ap.EmployeeCode,
-        ap.AdminLevel,
-        ap.IsActive
-      FROM dbo.NXA_Users u
-      LEFT JOIN dbo.NXA_AdminProfiles ap ON ap.UserId = u.UserId
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY u.CreatedAt DESC
-    `);
-
-    return result.recordset.map((r) => ({
-      id: String(r.UserId),
-      userId: String(r.UserId),
-      name: r.FullName,
-      email: r.Email,
-      mobile: r.MobileNumber,
-      role: (r.Role.toLowerCase() as UserRole) ?? "admin",
-      status: (r.AccountStatus.toLowerCase() as UserStatus) ?? "active",
-      department: r.AdminLevel ?? "Admissions & Operations",
-      permissions: ["manage_students", "approve_students", "manage_batches", "view_reports"],
-      ...(r.EmployeeCode ? { employeeCode: r.EmployeeCode } : {}),
-      ...(r.AdminLevel ? { adminLevel: r.AdminLevel } : {}),
-      createdAt: r.CreatedAt.toISOString(),
-    }));
+    const result = await req.query(`${this.adminSelect(conditions.join(" AND "))} ORDER BY u.CreatedAt DESC`);
+    return result.recordset.map((r) => this.mapAdminRow(r));
   }
 
   async findAdminById(id: EntityId): Promise<AdminProfile | null> {
+    if (!/^[0-9]+$/.test(id)) return null;
     const pool = await this.getPool();
     const req = pool.request();
     req.input("userId", sql.BigInt, id);
 
-    const result = await req.query<{
-      UserId: number | bigint;
-      FullName: string;
-      Email: string;
-      MobileNumber: string;
-      Role: string;
-      AccountStatus: string;
-      CreatedAt: Date;
-      EmployeeCode: string | null;
-      AdminLevel: string | null;
-      IsActive: boolean | null;
-    }>(`
-      SELECT 
-        u.UserId,
-        u.FullName,
-        u.Email,
-        u.MobileNumber,
-        u.Role,
-        u.AccountStatus,
-        u.CreatedAt,
-        ap.EmployeeCode,
-        ap.AdminLevel,
-        ap.IsActive
-      FROM dbo.NXA_Users u
-      LEFT JOIN dbo.NXA_AdminProfiles ap ON ap.UserId = u.UserId
-      WHERE u.UserId = @userId AND u.Role IN ('admin', 'super_admin')
-    `);
-
+    const result = await req.query(this.adminSelect("u.UserId = @userId"));
     const r = result.recordset[0];
-    if (!r) return null;
-
-    return {
-      id: String(r.UserId),
-      userId: String(r.UserId),
-      name: r.FullName,
-      email: r.Email,
-      mobile: r.MobileNumber,
-      role: (r.Role.toLowerCase() as UserRole) ?? "admin",
-      status: (r.AccountStatus.toLowerCase() as UserStatus) ?? "active",
-      department: r.AdminLevel ?? "Admissions & Operations",
-      permissions: ["manage_students", "approve_students", "manage_batches", "view_reports"],
-      ...(r.EmployeeCode ? { employeeCode: r.EmployeeCode } : {}),
-      ...(r.AdminLevel ? { adminLevel: r.AdminLevel } : {}),
-      createdAt: r.CreatedAt.toISOString(),
-    };
+    return r ? this.mapAdminRow(r) : null;
   }
 
   async createAdmin(input: {
     name: string;
     email: string;
     mobile: string;
+    passwordHash: string;
+    assignedByUserId: EntityId;
     department?: string | undefined;
     permissions?: string[] | undefined;
     adminLevel?: string | undefined;
     employeeCode?: string | undefined;
-  }): Promise<AdminProfile> {
+  }, audit?: StaffAudit): Promise<AdminProfile> {
+    const userId = await this.insertStaffUser({ ...input, roleCode: "admin" }, async (tx, newUserId) => {
+      const apReq = tx.request();
+      apReq.input("userId", sql.BigInt, newUserId);
+      apReq.input("empCode", sql.VarChar(40), input.employeeCode ?? `ADM-${newUserId}`);
+      apReq.input("level", sql.VarChar(20), (input.adminLevel ?? input.department ?? "General").slice(0, 20));
+      await apReq.query(`
+        INSERT INTO dbo.NXA_AdminProfiles (UserId, EmployeeCode, AdminLevel, IsActive, CreatedAt)
+        VALUES (@userId, @empCode, @level, 1, SYSUTCDATETIME())
+      `);
+      await writeStaffAudit(tx, audit, newUserId);
+    });
+
+    const created = await this.findAdminById(userId);
+    if (!created) throw new RecordNotFoundError("admin", userId);
+    return created;
+  }
+
+  /**
+   * Shared staff-account insert: duplicate check, NXA_Users row with a real
+   * password hash, role assignment, then the caller's profile insert - one
+   * transaction, rolled back on any failure. Fails loudly when the role code
+   * is not seeded in NXA_Roles rather than creating a role-less account.
+   */
+  private async insertStaffUser(
+    input: {
+      name: string;
+      email: string;
+      mobile: string;
+      passwordHash: string;
+      assignedByUserId: EntityId;
+      roleCode: string;
+      /** Staff accounts start `active`; admin-created students start `pending` (BR-001). */
+      accountStatus?: "active" | "pending";
+    },
+    insertProfile: (tx: sql.Transaction, userId: string) => Promise<void>,
+  ): Promise<string> {
     const pool = await this.getPool();
     const tx = pool.transaction();
     await tx.begin();
 
     try {
+      const email = input.email.trim();
+      const normalizedEmail = email.toLowerCase();
+      const mobile = input.mobile.trim();
+      const normalizedMobile = `${DEFAULT_COUNTRY_CODE}${mobile}`;
+
+      const dupReq = tx.request();
+      dupReq.input("normalizedEmail", sql.NVarChar(254), normalizedEmail);
+      dupReq.input("normalizedMobile", sql.VarChar(25), normalizedMobile);
+      const dup = await dupReq.query<{ NormalizedEmail: string | null; NormalizedMobile: string | null }>(`
+        SELECT TOP 1 NormalizedEmail, NormalizedMobile
+        FROM dbo.NXA_Users WITH (UPDLOCK, HOLDLOCK)
+        WHERE NormalizedEmail = @normalizedEmail OR NormalizedMobile = @normalizedMobile
+      `);
+      const found = dup.recordset[0];
+      if (found) {
+        if ((found.NormalizedEmail ?? "").toLowerCase() === normalizedEmail) {
+          throw new DuplicateRecordError("user", "email", normalizedEmail);
+        }
+        throw new DuplicateRecordError("user", "mobile", mobile);
+      }
+
+      const roleReq = tx.request();
+      roleReq.input("roleCode", sql.VarChar(40), input.roleCode);
+      const role = await roleReq.query<{ RoleId: number }>(`
+        SELECT TOP 1 RoleId FROM dbo.NXA_Roles WHERE LOWER(RoleCode) = LOWER(@roleCode) AND IsActive = 1
+      `);
+      const roleId = role.recordset[0]?.RoleId;
+      if (roleId === undefined) {
+        throw new Error(`Role '${input.roleCode}' is not seeded in dbo.NXA_Roles`);
+      }
+
       const uReq = tx.request();
-      uReq.input("name", sql.NVarChar(150), input.name);
-      uReq.input("email", sql.NVarChar(255), input.email.toLowerCase());
-      uReq.input("mobile", sql.VarChar(20), input.mobile);
-      uReq.input("role", sql.VarChar(20), "admin");
-      uReq.input("status", sql.VarChar(20), "ACTIVE");
-
+      uReq.input("fullName", sql.NVarChar(150), input.name.trim());
+      uReq.input("email", sql.NVarChar(254), email);
+      uReq.input("normalizedEmail", sql.NVarChar(254), normalizedEmail);
+      uReq.input("countryCode", sql.VarChar(8), DEFAULT_COUNTRY_CODE);
+      uReq.input("mobile", sql.VarChar(20), mobile);
+      uReq.input("normalizedMobile", sql.VarChar(25), normalizedMobile);
+      uReq.input("passwordHash", sql.NVarChar(500), input.passwordHash);
+      uReq.input("accountStatus", sql.VarChar(20), input.accountStatus ?? "active");
       const uRes = await uReq.query<{ UserId: number | bigint }>(`
-        INSERT INTO dbo.NXA_Users (FullName, Email, MobileNumber, Role, AccountStatus, CreatedAt, UpdatedAt)
+        INSERT INTO dbo.NXA_Users (
+          FullName, Email, NormalizedEmail, CountryCode, MobileNumber, NormalizedMobile,
+          PasswordHash, AccountStatus, EmailVerified, MobileVerified, TwoFactorEnabled,
+          IsLocked, FailedLoginAttempts, CreatedAt
+        )
         OUTPUT inserted.UserId
-        VALUES (@name, @email, @mobile, @role, @status, SYSUTCDATETIME(), SYSUTCDATETIME())
+        VALUES (
+          @fullName, @email, @normalizedEmail, @countryCode, @mobile, @normalizedMobile,
+          @passwordHash, @accountStatus, 0, 0, 0, 0, 0, SYSUTCDATETIME()
+        )
+      `);
+      const userId = String(uRes.recordset[0]!.UserId);
+
+      const urReq = tx.request();
+      urReq.input("userId", sql.BigInt, userId);
+      urReq.input("roleId", sql.Int, roleId);
+      urReq.input("assignedBy", sql.BigInt, input.assignedByUserId);
+      await urReq.query(`
+        INSERT INTO dbo.NXA_UserRoles (UserId, RoleId, AssignedAt, AssignedByUserId)
+        VALUES (@userId, @roleId, SYSUTCDATETIME(), @assignedBy)
       `);
 
-      const userId = uRes.recordset[0]!.UserId;
-      const empCode = input.employeeCode ?? `ADM-${userId}`;
-
-      const apReq = tx.request();
-      apReq.input("userId", sql.BigInt, userId);
-      apReq.input("empCode", sql.VarChar(40), empCode);
-      apReq.input("level", sql.VarChar(20), input.adminLevel ?? input.department ?? "General");
-
-      await apReq.query(`
-        INSERT INTO dbo.NXA_AdminProfiles (UserId, EmployeeCode, AdminLevel, IsActive, CreatedAt)
-        VALUES (@userId, @empCode, @level, 1, SYSUTCDATETIME())
-      `);
-
+      await insertProfile(tx, userId);
       await tx.commit();
-
-      return {
-        id: String(userId),
-        userId: String(userId),
-        name: input.name,
-        email: input.email.toLowerCase(),
-        mobile: input.mobile,
-        role: "admin",
-        status: "active",
-        department: input.department ?? "Admissions & Operations",
-        permissions: input.permissions ?? ["manage_students", "approve_students"],
-        employeeCode: empCode,
-        adminLevel: input.adminLevel ?? "General",
-        createdAt: new Date().toISOString(),
-      };
+      return userId;
     } catch (err) {
-      await tx.rollback();
+      try {
+        await tx.rollback();
+      } catch {
+        // Already rolled back by SQL Server (e.g. XACT_ABORT); the original error matters.
+      }
       throw err;
     }
   }
@@ -327,50 +653,58 @@ export class SqlServerAdminRepository implements AdminRepository {
       department?: string | undefined;
       permissions?: string[] | undefined;
     },
+    audit?: StaffAudit,
   ): Promise<AdminProfile> {
     const existing = await this.findAdminById(id);
     if (!existing) throw new RecordNotFoundError("admin", id);
 
+    // A save that changes nothing writes nothing and is not audited.
+    const nextName = (input.name ?? existing.name).trim();
+    const nextMobile = (input.mobile ?? existing.mobile).trim();
+    const nextLevel = (input.department ?? existing.department ?? "").slice(0, 20);
+    if (nextName === existing.name && nextMobile === existing.mobile && nextLevel === (existing.department ?? "")) return existing;
+
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("userId", sql.BigInt, id);
-    req.input("name", sql.NVarChar(150), input.name ?? existing.name);
-    req.input("mobile", sql.VarChar(20), input.mobile ?? existing.mobile);
-    req.input("level", sql.VarChar(20), input.department ?? existing.department);
+    const tx = pool.transaction();
+    await tx.begin();
+    try {
+      const mobile = (input.mobile ?? existing.mobile).trim();
+      if (input.mobile !== undefined && mobile !== existing.mobile) {
+        const dupReq = tx.request();
+        dupReq.input("userId", sql.BigInt, id);
+        dupReq.input("normalizedMobile", sql.VarChar(25), `${DEFAULT_COUNTRY_CODE}${mobile}`);
+        const dup = await dupReq.query(`
+          SELECT TOP 1 1 AS x FROM dbo.NXA_Users WITH (UPDLOCK, HOLDLOCK)
+          WHERE NormalizedMobile = @normalizedMobile AND UserId <> @userId
+        `);
+        if (dup.recordset.length > 0) throw new DuplicateRecordError("user", "mobile", mobile);
+      }
 
-    await req.query(`
-      UPDATE dbo.NXA_Users
-      SET FullName = @name, MobileNumber = @mobile, UpdatedAt = SYSUTCDATETIME()
-      WHERE UserId = @userId;
+      const req = tx.request();
+      req.input("userId", sql.BigInt, id);
+      req.input("name", sql.NVarChar(150), (input.name ?? existing.name).trim());
+      req.input("mobile", sql.VarChar(20), mobile);
+      req.input("normalizedMobile", sql.VarChar(25), `${DEFAULT_COUNTRY_CODE}${mobile}`);
+      req.input("level", sql.VarChar(20), (input.department ?? existing.department ?? "").slice(0, 20) || null);
+      await req.query(`
+        UPDATE dbo.NXA_Users
+        SET FullName = @name, MobileNumber = @mobile, NormalizedMobile = @normalizedMobile,
+            UpdatedAt = SYSUTCDATETIME()
+        WHERE UserId = @userId;
 
-      UPDATE dbo.NXA_AdminProfiles
-      SET AdminLevel = @level
-      WHERE UserId = @userId;
-    `);
-
-    const updated = await this.findAdminById(id);
-    if (!updated) throw new RecordNotFoundError("admin", id);
-    return updated;
-  }
-
-  async setAdminStatus(id: EntityId, status: UserStatus): Promise<AdminProfile> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("userId", sql.BigInt, id);
-    req.input("status", sql.VarChar(20), status.toUpperCase());
-
-    const result = await req.query(`
-      UPDATE dbo.NXA_Users
-      SET AccountStatus = @status, UpdatedAt = SYSUTCDATETIME()
-      WHERE UserId = @userId AND Role IN ('admin', 'super_admin');
-
-      UPDATE dbo.NXA_AdminProfiles
-      SET IsActive = CASE WHEN @status = 'ACTIVE' THEN 1 ELSE 0 END
-      WHERE UserId = @userId;
-    `);
-
-    if ((result.rowsAffected[0] ?? 0) === 0) {
-      throw new RecordNotFoundError("admin", id);
+        UPDATE dbo.NXA_AdminProfiles
+        SET AdminLevel = @level
+        WHERE UserId = @userId;
+      `);
+      await writeStaffAudit(tx, audit, id);
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // see insertStaffUser
+      }
+      throw err;
     }
 
     const updated = await this.findAdminById(id);
@@ -378,19 +712,144 @@ export class SqlServerAdminRepository implements AdminRepository {
     return updated;
   }
 
-  async resetAdminPassword(id: EntityId): Promise<{ temporaryPassword?: string | undefined }> {
-    const admin = await this.findAdminById(id);
-    if (!admin) throw new RecordNotFoundError("admin", id);
-    return { temporaryPassword: "TempPass@" + Math.floor(100000 + Math.random() * 900000) };
+  async setAdminStatus(id: EntityId, status: UserStatus, audit?: StaffAudit): Promise<AdminProfile> {
+    if (!/^[0-9]+$/.test(id)) throw new RecordNotFoundError("admin", id);
+    await this.inTeacherTransaction(async (tx) => {
+      const req = tx.request();
+      req.input("userId", sql.BigInt, id);
+      req.input("status", sql.VarChar(20), status.toLowerCase());
+      // Only a real change updates a row; an account already in that status is
+      // left untouched and not audited.
+      const result = await req.query(`
+        UPDATE u SET AccountStatus = @status, UpdatedAt = SYSUTCDATETIME()
+        FROM dbo.NXA_Users u
+        WHERE u.UserId = @userId AND u.DeletedAt IS NULL AND ${hasRole("u", ADMIN_ROLE_CODES)}
+          AND LOWER(ISNULL(u.AccountStatus, '')) <> @status;
+
+        IF @@ROWCOUNT > 0
+          UPDATE dbo.NXA_AdminProfiles
+          SET IsActive = CASE WHEN @status = 'active' THEN 1 ELSE 0 END
+          WHERE UserId = @userId;
+      `);
+      if ((result.rowsAffected[0] ?? 0) === 0) return;
+      await writeStaffAudit(tx, audit, id);
+    });
+
+    const updated = await this.findAdminById(id);
+    if (!updated) throw new RecordNotFoundError("admin", id);
+    return updated;
+  }
+
+  async setAdminPassword(id: EntityId, passwordHash: string, audit?: StaffAudit): Promise<void> {
+    if (!/^[0-9]+$/.test(id)) throw new RecordNotFoundError("admin", id);
+    await this.inTeacherTransaction(async (tx) => {
+      const req = tx.request();
+      req.input("userId", sql.BigInt, id);
+      req.input("passwordHash", sql.NVarChar(500), passwordHash);
+
+      const result = await req.query(`
+        UPDATE u
+        SET PasswordHash = @passwordHash,
+            FailedLoginAttempts = 0,
+            IsLocked = 0,
+            LockoutUntil = NULL,
+            UpdatedAt = SYSUTCDATETIME()
+        FROM dbo.NXA_Users u
+        WHERE u.UserId = @userId AND u.DeletedAt IS NULL AND ${hasRole("u", ["admin"])}
+      `);
+
+      if ((result.rowsAffected[0] ?? 0) === 0) {
+        throw new RecordNotFoundError("admin", id);
+      }
+      // The new password / hash never goes into the audit row (details is a fixed note).
+      await writeStaffAudit(tx, audit, id);
+    });
   }
 
   // Batches
+  private batchSelect(where: string): string {
+    return `
+      SELECT
+        b.BatchId,
+        b.CourseId,
+        c.CourseName,
+        b.BatchCode,
+        b.BatchName,
+        b.StartDate,
+        b.EndDate,
+        b.Capacity,
+        b.ScheduleDescription,
+        b.Status,
+        b.TimeZoneId,
+        b.CreatedAt,
+        b.UpdatedAt,
+        (
+          SELECT COUNT(1) FROM dbo.NXA_Enrollments e
+          WHERE e.BatchId = b.BatchId AND UPPER(e.EnrollmentStatus) <> 'CANCELLED'
+        ) AS CurrentEnrollments,
+        (
+          SELECT STRING_AGG(CAST(ta.TeacherUserId AS VARCHAR(30)), ',')
+          FROM dbo.NXA_TeacherAllocations ta
+          WHERE ta.BatchId = b.BatchId AND ta.IsActive = 1
+        ) AS AllocatedTeacherIds,
+        (
+          SELECT STRING_AGG(tu.FullName, '||')
+          FROM dbo.NXA_TeacherAllocations ta
+          JOIN dbo.NXA_Users tu ON tu.UserId = ta.TeacherUserId
+          WHERE ta.BatchId = b.BatchId AND ta.IsActive = 1
+        ) AS AllocatedTeacherNames
+      FROM dbo.NXA_Batches b
+      LEFT JOIN dbo.NXA_Courses c ON c.CourseId = b.CourseId
+      WHERE ${where}
+    `;
+  }
+
+  private mapBatchRow(r: {
+    BatchId: number | bigint;
+    CourseId: number | bigint;
+    CourseName: string | null;
+    BatchCode: string;
+    BatchName: string;
+    StartDate: Date | null;
+    EndDate: Date | null;
+    Capacity: number | null;
+    ScheduleDescription: string | null;
+    Status: string;
+    TimeZoneId: string | null;
+    CreatedAt: Date;
+    UpdatedAt: Date | null;
+    CurrentEnrollments: number | null;
+    AllocatedTeacherIds: string | null;
+    AllocatedTeacherNames: string | null;
+  }): BatchRecord {
+    return {
+      id: String(r.BatchId),
+      courseId: String(r.CourseId),
+      ...(r.CourseName ? { courseName: r.CourseName } : {}),
+      batchCode: r.BatchCode,
+      batchName: r.BatchName,
+      ...(r.StartDate ? { startDate: r.StartDate.toISOString().split("T")[0] } : {}),
+      ...(r.EndDate ? { endDate: r.EndDate.toISOString().split("T")[0] } : {}),
+      // NULL capacity means "not set" - never a fabricated default.
+      ...(r.Capacity !== null && r.Capacity !== undefined ? { capacity: Number(r.Capacity) } : {}),
+      ...(r.ScheduleDescription ? { scheduleDescription: r.ScheduleDescription } : {}),
+      status: (r.Status ?? "").toLowerCase(),
+      ...(r.TimeZoneId ? { timeZoneId: r.TimeZoneId } : {}),
+      currentEnrollments: Number(r.CurrentEnrollments ?? 0),
+      allocatedTeacherIds: r.AllocatedTeacherIds ? r.AllocatedTeacherIds.split(",") : [],
+      allocatedTeacherNames: r.AllocatedTeacherNames ? r.AllocatedTeacherNames.split("||") : [],
+      createdAt: r.CreatedAt.toISOString(),
+      ...(r.UpdatedAt ? { updatedAt: r.UpdatedAt.toISOString() } : {}),
+    };
+  }
+
   async findBatches(filter?: { courseId?: string | undefined; status?: string | undefined }): Promise<BatchRecord[]> {
     const pool = await this.getPool();
     const req = pool.request();
     const conditions: string[] = ["1=1"];
 
     if (filter?.courseId) {
+      if (!/^[0-9]+$/.test(filter.courseId)) return [];
       req.input("courseId", sql.BigInt, filter.courseId);
       conditions.push("b.CourseId = @courseId");
     }
@@ -399,113 +858,18 @@ export class SqlServerAdminRepository implements AdminRepository {
       conditions.push("LOWER(b.Status) = @status");
     }
 
-    const result = await req.query<{
-      BatchId: number | bigint;
-      CourseId: number | bigint;
-      BatchCode: string;
-      BatchName: string;
-      StartDate: Date | null;
-      EndDate: Date | null;
-      Capacity: number | null;
-      ScheduleDescription: string | null;
-      Status: string;
-      TimeZoneId: string | null;
-      CreatedAt: Date;
-      UpdatedAt: Date | null;
-      CurrentEnrollments: number | null;
-    }>(`
-      SELECT 
-        b.BatchId,
-        b.CourseId,
-        b.BatchCode,
-        b.BatchName,
-        b.StartDate,
-        b.EndDate,
-        b.Capacity,
-        b.ScheduleDescription,
-        b.Status,
-        b.TimeZoneId,
-        b.CreatedAt,
-        b.UpdatedAt,
-        (SELECT COUNT(1) FROM dbo.NXA_Enrollments e WHERE e.BatchId = b.BatchId) AS CurrentEnrollments
-      FROM dbo.NXA_Batches b
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY b.CreatedAt DESC
-    `);
-
-    return result.recordset.map((r) => ({
-      id: String(r.BatchId),
-      courseId: String(r.CourseId),
-      batchCode: r.BatchCode,
-      batchName: r.BatchName,
-      ...(r.StartDate ? { startDate: r.StartDate.toISOString().split("T")[0] } : {}),
-      ...(r.EndDate ? { endDate: r.EndDate.toISOString().split("T")[0] } : {}),
-      capacity: r.Capacity ?? 40,
-      ...(r.ScheduleDescription ? { scheduleDescription: r.ScheduleDescription } : {}),
-      status: (r.Status ?? "upcoming").toLowerCase(),
-      timeZoneId: r.TimeZoneId ?? "Asia/Kolkata",
-      currentEnrollments: r.CurrentEnrollments ?? 0,
-      createdAt: r.CreatedAt.toISOString(),
-      ...(r.UpdatedAt ? { updatedAt: r.UpdatedAt.toISOString() } : {}),
-    }));
+    const result = await req.query(`${this.batchSelect(conditions.join(" AND "))} ORDER BY b.CreatedAt DESC`);
+    return result.recordset.map((r) => this.mapBatchRow(r));
   }
 
   async findBatchById(id: EntityId): Promise<BatchRecord | null> {
+    if (!/^[0-9]+$/.test(id)) return null;
     const pool = await this.getPool();
     const req = pool.request();
     req.input("batchId", sql.BigInt, id);
-
-    const result = await req.query<{
-      BatchId: number | bigint;
-      CourseId: number | bigint;
-      BatchCode: string;
-      BatchName: string;
-      StartDate: Date | null;
-      EndDate: Date | null;
-      Capacity: number | null;
-      ScheduleDescription: string | null;
-      Status: string;
-      TimeZoneId: string | null;
-      CreatedAt: Date;
-      UpdatedAt: Date | null;
-      CurrentEnrollments: number | null;
-    }>(`
-      SELECT 
-        b.BatchId,
-        b.CourseId,
-        b.BatchCode,
-        b.BatchName,
-        b.StartDate,
-        b.EndDate,
-        b.Capacity,
-        b.ScheduleDescription,
-        b.Status,
-        b.TimeZoneId,
-        b.CreatedAt,
-        b.UpdatedAt,
-        (SELECT COUNT(1) FROM dbo.NXA_Enrollments e WHERE e.BatchId = b.BatchId) AS CurrentEnrollments
-      FROM dbo.NXA_Batches b
-      WHERE b.BatchId = @batchId
-    `);
-
+    const result = await req.query(this.batchSelect("b.BatchId = @batchId"));
     const r = result.recordset[0];
-    if (!r) return null;
-
-    return {
-      id: String(r.BatchId),
-      courseId: String(r.CourseId),
-      batchCode: r.BatchCode,
-      batchName: r.BatchName,
-      ...(r.StartDate ? { startDate: r.StartDate.toISOString().split("T")[0] } : {}),
-      ...(r.EndDate ? { endDate: r.EndDate.toISOString().split("T")[0] } : {}),
-      capacity: r.Capacity ?? 40,
-      ...(r.ScheduleDescription ? { scheduleDescription: r.ScheduleDescription } : {}),
-      status: (r.Status ?? "upcoming").toLowerCase(),
-      timeZoneId: r.TimeZoneId ?? "Asia/Kolkata",
-      currentEnrollments: r.CurrentEnrollments ?? 0,
-      createdAt: r.CreatedAt.toISOString(),
-      ...(r.UpdatedAt ? { updatedAt: r.UpdatedAt.toISOString() } : {}),
-    };
+    return r ? this.mapBatchRow(r) : null;
   }
 
   async createBatch(input: {
@@ -516,44 +880,50 @@ export class SqlServerAdminRepository implements AdminRepository {
     endDate?: string | undefined;
     capacity?: number | undefined;
     scheduleDescription?: string | undefined;
-  }): Promise<BatchRecord> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("courseId", sql.BigInt, input.courseId);
-    req.input("code", sql.VarChar(40), input.batchCode);
-    req.input("name", sql.NVarChar(150), input.batchName);
-    req.input("start", sql.Date, input.startDate ? new Date(input.startDate) : null);
-    req.input("end", sql.Date, input.endDate ? new Date(input.endDate) : null);
-    req.input("capacity", sql.Int, input.capacity ?? 40);
-    req.input("desc", sql.NVarChar(500), input.scheduleDescription ?? null);
+  }, audit?: StaffAudit): Promise<BatchRecord> {
+    requireNumericIds({ course: input.courseId });
+    const batchId = await this.inTeacherTransaction(async (tx) => {
+      const courseReq = tx.request();
+      courseReq.input("courseId", sql.BigInt, input.courseId);
+      const course = await courseReq.query(`
+        SELECT 1 AS x FROM dbo.NXA_Courses WHERE CourseId = @courseId AND DeletedAt IS NULL
+      `);
+      if (course.recordset.length === 0) throw new RecordNotFoundError("course", input.courseId);
 
-    const result = await req.query<{ BatchId: number | bigint }>(`
-      INSERT INTO dbo.NXA_Batches (
-        CourseId, BatchCode, BatchName, StartDate, EndDate, Capacity,
-        ScheduleDescription, Status, TimeZoneId, CreatedAt, UpdatedAt
-      )
-      OUTPUT inserted.BatchId
-      VALUES (
-        @courseId, @code, @name, @start, @end, @capacity,
-        @desc, 'upcoming', 'Asia/Kolkata', SYSUTCDATETIME(), SYSUTCDATETIME()
-      )
-    `);
+      const req = tx.request();
+      req.input("courseId", sql.BigInt, input.courseId);
+      req.input("code", sql.VarChar(40), input.batchCode);
+      req.input("name", sql.NVarChar(150), input.batchName);
+      req.input("start", sql.Date, input.startDate ? new Date(input.startDate) : null);
+      req.input("end", sql.Date, input.endDate ? new Date(input.endDate) : null);
+      req.input("capacity", sql.Int, input.capacity ?? null);
+      req.input("desc", sql.NVarChar(500), input.scheduleDescription ?? null);
 
-    const id = String(result.recordset[0]?.BatchId);
-    return {
-      id,
-      courseId: input.courseId,
-      batchCode: input.batchCode,
-      batchName: input.batchName,
-      ...(input.startDate ? { startDate: input.startDate } : {}),
-      ...(input.endDate ? { endDate: input.endDate } : {}),
-      capacity: input.capacity ?? 40,
-      ...(input.scheduleDescription ? { scheduleDescription: input.scheduleDescription } : {}),
-      status: "upcoming",
-      timeZoneId: "Asia/Kolkata",
-      currentEnrollments: 0,
-      createdAt: new Date().toISOString(),
-    };
+      let newId: string;
+      try {
+        const result = await req.query<{ BatchId: number | bigint }>(`
+          INSERT INTO dbo.NXA_Batches (
+            CourseId, BatchCode, BatchName, StartDate, EndDate, Capacity,
+            ScheduleDescription, Status, TimeZoneId, CreatedAt, UpdatedAt
+          )
+          OUTPUT inserted.BatchId
+          VALUES (
+            @courseId, @code, @name, @start, @end, @capacity,
+            @desc, 'upcoming', 'Asia/Kolkata', SYSUTCDATETIME(), SYSUTCDATETIME()
+          )
+        `);
+        newId = String(result.recordset[0]?.BatchId);
+      } catch (err) {
+        if (isUniqueViolation(err)) throw new DuplicateRecordError("batch", "batchCode", input.batchCode);
+        throw err;
+      }
+      await writeStaffAudit(tx, audit, newId);
+      return newId;
+    });
+
+    const created = await this.findBatchById(batchId);
+    if (!created) throw new RecordNotFoundError("batch", batchId);
+    return created;
   }
 
   async updateBatch(
@@ -565,190 +935,253 @@ export class SqlServerAdminRepository implements AdminRepository {
       capacity?: number | undefined;
       scheduleDescription?: string | undefined;
     },
+    audit?: StaffAudit,
   ): Promise<BatchRecord> {
     const existing = await this.findBatchById(id);
     if (!existing) throw new RecordNotFoundError("batch", id);
 
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("batchId", sql.BigInt, id);
-    req.input("name", sql.NVarChar(150), input.batchName ?? existing.batchName);
-    req.input("start", sql.Date, input.startDate ? new Date(input.startDate) : (existing.startDate ? new Date(existing.startDate) : null));
-    req.input("end", sql.Date, input.endDate ? new Date(input.endDate) : (existing.endDate ? new Date(existing.endDate) : null));
-    req.input("capacity", sql.Int, input.capacity ?? existing.capacity ?? 40);
-    req.input("desc", sql.NVarChar(500), input.scheduleDescription ?? existing.scheduleDescription ?? null);
-
-    await req.query(`
-      UPDATE dbo.NXA_Batches
-      SET BatchName = @name, StartDate = @start, EndDate = @end, Capacity = @capacity,
-          ScheduleDescription = @desc, UpdatedAt = SYSUTCDATETIME()
-      WHERE BatchId = @batchId
-    `);
-
-    const updated = await this.findBatchById(id);
-    if (!updated) throw new RecordNotFoundError("batch", id);
-    return updated;
-  }
-
-  async setBatchStatus(id: EntityId, status: string): Promise<BatchRecord> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("batchId", sql.BigInt, id);
-    req.input("status", sql.VarChar(20), status.toLowerCase());
-
-    const result = await req.query(`
-      UPDATE dbo.NXA_Batches
-      SET Status = @status, UpdatedAt = SYSUTCDATETIME()
-      WHERE BatchId = @batchId
-    `);
-
-    if ((result.rowsAffected[0] ?? 0) === 0) {
-      throw new RecordNotFoundError("batch", id);
+    const startDate = input.startDate ?? existing.startDate;
+    const endDate = input.endDate ?? existing.endDate;
+    if (startDate && endDate && endDate < startDate) {
+      throw new AdminRuleViolationError("INVALID_DATE_RANGE", "End date cannot be before start date");
+    }
+    const next = {
+      batchName: input.batchName ?? existing.batchName,
+      startDate,
+      endDate,
+      capacity: input.capacity ?? existing.capacity,
+      scheduleDescription: input.scheduleDescription ?? existing.scheduleDescription,
+    };
+    // A save that changes nothing writes nothing and is not audited.
+    const same = (a: unknown, b: unknown) => (a ?? null) === (b ?? null);
+    if (
+      same(next.batchName, existing.batchName) &&
+      same(next.startDate, existing.startDate) &&
+      same(next.endDate, existing.endDate) &&
+      same(next.capacity, existing.capacity) &&
+      same(next.scheduleDescription, existing.scheduleDescription)
+    ) {
+      return existing;
     }
 
+    await this.inTeacherTransaction(async (tx) => {
+      const req = tx.request();
+      req.input("batchId", sql.BigInt, id);
+      req.input("name", sql.NVarChar(150), next.batchName);
+      req.input("start", sql.Date, startDate ? new Date(startDate) : null);
+      req.input("end", sql.Date, endDate ? new Date(endDate) : null);
+      req.input("capacity", sql.Int, next.capacity ?? null);
+      req.input("desc", sql.NVarChar(500), next.scheduleDescription ?? null);
+      const result = await req.query(`
+        UPDATE dbo.NXA_Batches
+        SET BatchName = @name, StartDate = @start, EndDate = @end, Capacity = @capacity,
+            ScheduleDescription = @desc, UpdatedAt = SYSUTCDATETIME()
+        WHERE BatchId = @batchId
+      `);
+      if ((result.rowsAffected[0] ?? 0) === 0) throw new RecordNotFoundError("batch", id);
+      await writeStaffAudit(tx, audit, id);
+    });
+
     const updated = await this.findBatchById(id);
     if (!updated) throw new RecordNotFoundError("batch", id);
     return updated;
   }
 
-  async allocateTeacher(batchId: EntityId, teacherUserId: EntityId, courseId?: EntityId): Promise<void> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("batchId", sql.BigInt, batchId);
-    req.input("teacherId", sql.BigInt, teacherUserId);
-    req.input("courseId", sql.BigInt, courseId ?? 1);
+  async setBatchStatus(id: EntityId, status: BatchStatusValue, audit?: StaffAudit): Promise<BatchRecord> {
+    if (!/^[0-9]+$/.test(id)) throw new RecordNotFoundError("batch", id);
+    await this.inTeacherTransaction(async (tx) => {
+      const req = tx.request();
+      req.input("batchId", sql.BigInt, id);
+      req.input("status", sql.VarChar(20), status);
+      // Only a real change updates a row; a batch already in that status is
+      // left untouched and not audited.
+      const result = await req.query(`
+        UPDATE dbo.NXA_Batches
+        SET Status = @status, UpdatedAt = SYSUTCDATETIME()
+        WHERE BatchId = @batchId AND LOWER(ISNULL(Status, '')) <> LOWER(@status)
+      `);
+      if ((result.rowsAffected[0] ?? 0) === 0) return;
+      await writeStaffAudit(tx, audit, id);
+    });
 
-    await req.query(`
-      IF NOT EXISTS (
-        SELECT 1 FROM dbo.NXA_TeacherAllocations 
-        WHERE TeacherUserId = @teacherId AND BatchId = @batchId AND IsActive = 1
-      )
-      BEGIN
-        INSERT INTO dbo.NXA_TeacherAllocations (TeacherUserId, CourseId, BatchId, IsActive, AllocatedAt)
-        VALUES (@teacherId, @courseId, @batchId, 1, SYSUTCDATETIME())
-      END
-    `);
+    const updated = await this.findBatchById(id);
+    if (!updated) throw new RecordNotFoundError("batch", id);
+    return updated;
   }
 
-  async unallocateTeacher(batchId: EntityId, teacherUserId: EntityId): Promise<void> {
+  async allocateTeacher(input: {
+    batchId: EntityId;
+    courseId: EntityId;
+    teacherUserId: EntityId;
+    allocatedByUserId: EntityId;
+  }, audit?: StaffAudit): Promise<void> {
+    requireNumericIds({ batch: input.batchId, course: input.courseId });
+    if (!/^[0-9]+$/.test(input.teacherUserId)) {
+      throw new AdminRuleViolationError("NOT_A_TEACHER", "The selected user is not a teacher account");
+    }
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("batchId", sql.BigInt, batchId);
-    req.input("teacherId", sql.BigInt, teacherUserId);
+    const tx = pool.transaction();
+    await tx.begin();
 
-    await req.query(`
-      UPDATE dbo.NXA_TeacherAllocations
-      SET IsActive = 0
-      WHERE BatchId = @batchId AND TeacherUserId = @teacherId
-    `);
+    try {
+      const batchReq = tx.request();
+      batchReq.input("batchId", sql.BigInt, input.batchId);
+      const batch = await batchReq.query<{ CourseId: number | bigint; Status: string }>(`
+        SELECT CourseId, Status FROM dbo.NXA_Batches WITH (UPDLOCK) WHERE BatchId = @batchId
+      `);
+      const b = batch.recordset[0];
+      if (!b) throw new RecordNotFoundError("batch", input.batchId);
+      if (String(b.CourseId) !== String(input.courseId)) {
+        throw new AdminRuleViolationError("BATCH_COURSE_MISMATCH", "The selected batch does not belong to the selected course");
+      }
+      if (["completed", "cancelled"].includes((b.Status ?? "").toLowerCase())) {
+        throw new AdminRuleViolationError("BATCH_CLOSED", `Cannot allocate a teacher to a ${b.Status.toLowerCase()} batch`);
+      }
+
+      const tReq = tx.request();
+      tReq.input("teacherId", sql.BigInt, input.teacherUserId);
+      const teacher = await tReq.query<{ AccountStatus: string }>(`
+        SELECT u.AccountStatus FROM dbo.NXA_Users u
+        WHERE u.UserId = @teacherId AND u.DeletedAt IS NULL AND ${hasRole("u", TEACHER_ROLE_CODES)}
+      `);
+      const t = teacher.recordset[0];
+      if (!t) throw new AdminRuleViolationError("NOT_A_TEACHER", "The selected user is not a teacher account");
+      if ((t.AccountStatus ?? "").toLowerCase() !== "active") {
+        throw new AdminRuleViolationError("TEACHER_INACTIVE", "Only active teacher accounts can be allocated");
+      }
+
+      const ins = tx.request();
+      ins.input("batchId", sql.BigInt, input.batchId);
+      ins.input("courseId", sql.BigInt, input.courseId);
+      ins.input("teacherId", sql.BigInt, input.teacherUserId);
+      const result = await ins.query(`
+        IF EXISTS (
+          SELECT 1 FROM dbo.NXA_TeacherAllocations WITH (UPDLOCK, HOLDLOCK)
+          WHERE TeacherUserId = @teacherId AND BatchId = @batchId AND IsActive = 1
+        )
+          SELECT CAST(1 AS BIT) AS AlreadyAllocated
+        ELSE
+        BEGIN
+          INSERT INTO dbo.NXA_TeacherAllocations (TeacherUserId, CourseId, BatchId, IsActive, AllocatedAt)
+          VALUES (@teacherId, @courseId, @batchId, 1, SYSUTCDATETIME());
+          SELECT CAST(0 AS BIT) AS AlreadyAllocated;
+        END
+      `);
+      if (result.recordset[0]?.AlreadyAllocated) {
+        throw new DuplicateRecordError("allocation", "teacherUserId", input.teacherUserId);
+      }
+
+      await writeStaffAudit(tx, audit, input.batchId);
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // see insertStaffUser
+      }
+      throw err;
+    }
+  }
+
+  async unallocateTeacher(batchId: EntityId, teacherUserId: EntityId, audit?: StaffAudit): Promise<void> {
+    if (!/^[0-9]+$/.test(batchId) || !/^[0-9]+$/.test(teacherUserId)) {
+      throw new RecordNotFoundError("allocation", `${batchId}/${teacherUserId}`);
+    }
+    await this.inTeacherTransaction(async (tx) => {
+      const req = tx.request();
+      req.input("batchId", sql.BigInt, batchId);
+      req.input("teacherId", sql.BigInt, teacherUserId);
+      const result = await req.query(`
+        UPDATE dbo.NXA_TeacherAllocations
+        SET IsActive = 0
+        WHERE BatchId = @batchId AND TeacherUserId = @teacherId AND IsActive = 1
+      `);
+      if ((result.rowsAffected[0] ?? 0) === 0) {
+        throw new RecordNotFoundError("allocation", `${batchId}/${teacherUserId}`);
+      }
+      await writeStaffAudit(tx, audit, batchId);
+    });
   }
 
   async findBatchStudents(batchId: EntityId): Promise<Student[]> {
+    if (!/^[0-9]+$/.test(batchId)) return [];
     const pool = await this.getPool();
     const req = pool.request();
     req.input("batchId", sql.BigInt, batchId);
 
+    // Columns per the live NXA_StudentProfiles schema (Degree, Branch,
+    // InterestedCourseId, ApprovalStatus ...).
     const result = await req.query<{
       UserId: number | bigint;
       FullName: string;
-      Email: string;
-      MobileNumber: string;
+      Email: string | null;
+      MobileNumber: string | null;
       AccountStatus: string;
+      EmailVerified: boolean;
+      MobileVerified: boolean;
       CreatedAt: Date;
       CollegeName: string | null;
-      DegreeBranch: string | null;
-      PassingYear: string | null;
-      CourseInterestedIn: string | null;
+      Degree: string | null;
+      Branch: string | null;
+      PassingYear: number | null;
+      InterestedCourseId: number | bigint | null;
+      DateOfBirth: Date | null;
+      Gender: string | null;
+      AddressLine1: string | null;
+      ApprovalStatus: string | null;
+      EnrolledCourseIds: string | null;
     }>(`
-      SELECT 
-        u.UserId,
-        u.FullName,
-        u.Email,
-        u.MobileNumber,
-        u.AccountStatus,
-        u.CreatedAt,
-        sp.CollegeName,
-        sp.DegreeBranch,
-        sp.PassingYear,
-        sp.CourseInterestedIn
+      SELECT
+        u.UserId, u.FullName, u.Email, u.MobileNumber, u.AccountStatus,
+        u.EmailVerified, u.MobileVerified, u.CreatedAt,
+        sp.CollegeName, sp.Degree, sp.Branch, sp.PassingYear, sp.InterestedCourseId,
+        sp.DateOfBirth, sp.Gender, sp.AddressLine1, sp.ApprovalStatus,
+        (
+          SELECT STRING_AGG(CAST(e2.CourseId AS VARCHAR(30)), ',')
+          FROM dbo.NXA_Enrollments e2
+          WHERE e2.StudentUserId = u.UserId AND UPPER(e2.EnrollmentStatus) IN ('ACTIVE', 'COMPLETED')
+        ) AS EnrolledCourseIds
       FROM dbo.NXA_Enrollments e
       INNER JOIN dbo.NXA_Users u ON u.UserId = e.StudentUserId
       LEFT JOIN dbo.NXA_StudentProfiles sp ON sp.UserId = u.UserId
-      WHERE e.BatchId = @batchId
+      WHERE e.BatchId = @batchId AND UPPER(e.EnrollmentStatus) <> 'CANCELLED'
+      ORDER BY u.FullName
     `);
 
-    return result.recordset.map((r) => ({
-      id: String(r.UserId),
-      userId: String(r.UserId),
-      name: r.FullName,
-      email: r.Email,
-      mobile: r.MobileNumber,
-      role: "student",
-      status: (r.AccountStatus.toLowerCase() as UserStatus) ?? "active",
-      collegeName: r.CollegeName ?? "",
-      degreeBranch: r.DegreeBranch ?? "",
-      passingYear: r.PassingYear ?? "",
-      courseInterestedIn: r.CourseInterestedIn ?? "",
-      dateOfBirth: "",
-      gender: "other",
-      fullAddress: "",
-      isEmailVerified: true,
-      isMobileVerified: false,
-      adminApprovalStatus: "approved",
-      enrolledCourseIds: [],
-      createdAt: r.CreatedAt.toISOString(),
-    }));
+    return result.recordset.map((r) => {
+      const degree = r.Degree?.trim() ?? "";
+      const branch = r.Branch?.trim() ?? "";
+      const approval = (r.ApprovalStatus ?? "pending").toLowerCase();
+      const gender = (r.Gender ?? "").toLowerCase();
+      return {
+        id: String(r.UserId),
+        userId: String(r.UserId),
+        name: r.FullName,
+        email: r.Email ?? "",
+        mobile: r.MobileNumber ?? "",
+        role: "student" as const,
+        status: toUserStatus(r.AccountStatus),
+        collegeName: r.CollegeName ?? "",
+        degreeBranch: degree && branch ? `${degree} - ${branch}` : degree || branch,
+        passingYear: r.PassingYear !== null && r.PassingYear !== undefined ? String(r.PassingYear) : "",
+        courseInterestedIn: r.InterestedCourseId !== null && r.InterestedCourseId !== undefined ? String(r.InterestedCourseId) : "",
+        dateOfBirth: r.DateOfBirth ? r.DateOfBirth.toISOString().split("T")[0]! : "",
+        gender: gender === "male" || gender === "female" ? gender : "other",
+        fullAddress: r.AddressLine1 ?? "",
+        isEmailVerified: Boolean(r.EmailVerified),
+        isMobileVerified: Boolean(r.MobileVerified),
+        adminApprovalStatus: approval === "approved" || approval === "rejected" ? approval : "pending",
+        // Display only (ACTIVE + COMPLETED); never used for authorization.
+        enrolledCourseIds: r.EnrolledCourseIds ? r.EnrolledCourseIds.split(",") : [],
+        createdAt: r.CreatedAt.toISOString(),
+      } as Student;
+    });
   }
 
   // Enrollments
-  async findEnrollments(filter?: {
-    studentId?: string | undefined;
-    courseId?: string | undefined;
-    batchId?: string | undefined;
-    status?: string | undefined;
-  }): Promise<EnrollmentAdminRecord[]> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    const conditions: string[] = ["1=1"];
-
-    if (filter?.studentId) {
-      req.input("studentId", sql.BigInt, filter.studentId);
-      conditions.push("e.StudentUserId = @studentId");
-    }
-    if (filter?.courseId) {
-      req.input("courseId", sql.BigInt, filter.courseId);
-      conditions.push("e.CourseId = @courseId");
-    }
-    if (filter?.batchId) {
-      req.input("batchId", sql.BigInt, filter.batchId);
-      conditions.push("e.BatchId = @batchId");
-    }
-    if (filter?.status) {
-      req.input("status", sql.VarChar(25), filter.status.toUpperCase());
-      conditions.push("UPPER(e.EnrollmentStatus) = @status");
-    }
-
-    const result = await req.query<{
-      EnrollmentId: number | bigint;
-      StudentUserId: number | bigint;
-      StudentName: string | null;
-      StudentEmail: string | null;
-      CourseId: number | bigint;
-      CourseTitle: string | null;
-      BatchId: number | bigint | null;
-      BatchCode: string | null;
-      EnrollmentNumber: string;
-      EnrollmentStatus: string;
-      CoursePrice: number;
-      DiscountAmount: number;
-      FinalAmount: number;
-      CurrencyCode: string;
-      EnrollmentSource: string;
-      ActivatedAt: Date | null;
-      CompletedAt: Date | null;
-      CreatedAt: Date;
-    }>(`
-      SELECT 
+  private enrollmentSelect(where: string): string {
+    return `
+      SELECT
         e.EnrollmentId,
         e.StudentUserId,
         u.FullName AS StudentName,
@@ -771,11 +1204,31 @@ export class SqlServerAdminRepository implements AdminRepository {
       LEFT JOIN dbo.NXA_Users u ON u.UserId = e.StudentUserId
       LEFT JOIN dbo.NXA_Courses c ON c.CourseId = e.CourseId
       LEFT JOIN dbo.NXA_Batches b ON b.BatchId = e.BatchId
-      WHERE ${conditions.join(" AND ")}
-      ORDER BY e.CreatedAt DESC
-    `);
+      WHERE ${where}
+    `;
+  }
 
-    return result.recordset.map((r) => ({
+  private mapEnrollmentRow(r: {
+    EnrollmentId: number | bigint;
+    StudentUserId: number | bigint;
+    StudentName: string | null;
+    StudentEmail: string | null;
+    CourseId: number | bigint;
+    CourseTitle: string | null;
+    BatchId: number | bigint | null;
+    BatchCode: string | null;
+    EnrollmentNumber: string;
+    EnrollmentStatus: string;
+    CoursePrice: number;
+    DiscountAmount: number;
+    FinalAmount: number;
+    CurrencyCode: string | null;
+    EnrollmentSource: string | null;
+    ActivatedAt: Date | null;
+    CompletedAt: Date | null;
+    CreatedAt: Date;
+  }): EnrollmentAdminRecord {
+    return {
       id: String(r.EnrollmentId),
       studentUserId: String(r.StudentUserId),
       ...(r.StudentName ? { studentName: r.StudentName } : {}),
@@ -790,85 +1243,526 @@ export class SqlServerAdminRepository implements AdminRepository {
       discountAmount: Number(r.DiscountAmount),
       finalAmount: Number(r.FinalAmount),
       currencyCode: r.CurrencyCode ?? "INR",
-      enrollmentSource: r.EnrollmentSource ?? "DIRECT",
+      enrollmentSource: (r.EnrollmentSource ?? "").toLowerCase(),
       ...(r.ActivatedAt ? { activatedAt: r.ActivatedAt.toISOString() } : {}),
       ...(r.CompletedAt ? { completedAt: r.CompletedAt.toISOString() } : {}),
       createdAt: r.CreatedAt.toISOString(),
-    }));
+    };
+  }
+
+  async findEnrollments(filter?: {
+    studentId?: string | undefined;
+    courseId?: string | undefined;
+    batchId?: string | undefined;
+    status?: string | undefined;
+  }): Promise<EnrollmentAdminRecord[]> {
+    const pool = await this.getPool();
+    const req = pool.request();
+    const conditions: string[] = ["1=1"];
+
+    for (const [key, column] of [
+      ["studentId", "e.StudentUserId"],
+      ["courseId", "e.CourseId"],
+      ["batchId", "e.BatchId"],
+    ] as const) {
+      const value = filter?.[key];
+      if (value) {
+        if (!/^[0-9]+$/.test(value)) return [];
+        req.input(key, sql.BigInt, value);
+        conditions.push(`${column} = @${key}`);
+      }
+    }
+    if (filter?.status) {
+      req.input("status", sql.VarChar(25), filter.status.toUpperCase());
+      conditions.push("UPPER(e.EnrollmentStatus) = @status");
+    }
+
+    const result = await req.query(`${this.enrollmentSelect(conditions.join(" AND "))} ORDER BY e.CreatedAt DESC`);
+    return result.recordset.map((r) => this.mapEnrollmentRow(r));
+  }
+
+  async findEnrollmentById(id: EntityId): Promise<EnrollmentAdminRecord | null> {
+    if (!/^[0-9]+$/.test(id)) return null;
+    const pool = await this.getPool();
+    const req = pool.request();
+    req.input("enrId", sql.BigInt, id);
+    const result = await req.query(this.enrollmentSelect("e.EnrollmentId = @enrId"));
+    const r = result.recordset[0];
+    return r ? this.mapEnrollmentRow(r) : null;
   }
 
   async createEnrollment(input: {
     studentUserId: EntityId;
     courseId: EntityId;
     batchId?: EntityId | undefined;
-    coursePrice?: number | undefined;
-    discountAmount?: number | undefined;
-    finalAmount?: number | undefined;
-    currencyCode?: string | undefined;
+    discountCode?: string | undefined;
+    status: "approved_unpaid" | "active";
+    freeAccess?: boolean | undefined;
+    createdByUserId: EntityId;
+    capacityOverrideReason?: string | undefined;
+    prerequisiteOverrideReason?: string | undefined;
+    audit: TransactionalAudit;
   }): Promise<EnrollmentAdminRecord> {
+    requireNumericIds({ student: input.studentUserId, course: input.courseId, batch: input.batchId });
+    if (input.freeAccess) {
+      // Defence in depth: the service and validation already guarantee these.
+      if (input.status !== "active") throw new Error("A free access override must create an ACTIVE enrollment");
+      if (!input.audit.reason) throw new AdminRuleViolationError("REASON_REQUIRED", "A free access override requires a reason");
+      if (input.discountCode) {
+        throw new AdminRuleViolationError("FREE_ACCESS_WITH_DISCOUNT", "A discount code cannot be combined with free access");
+      }
+    }
     const pool = await this.getPool();
-    const req = pool.request();
-    const enrNum = `ENR-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
+    const tx = pool.transaction();
+    await tx.begin();
 
-    req.input("studentId", sql.BigInt, input.studentUserId);
-    req.input("courseId", sql.BigInt, input.courseId);
-    req.input("batchId", sql.BigInt, input.batchId ?? null);
-    req.input("enrNum", sql.VarChar(40), enrNum);
-    req.input("status", sql.VarChar(25), "ACTIVE");
-    req.input("price", sql.Decimal(12, 2), input.coursePrice ?? 0);
-    req.input("discount", sql.Decimal(12, 2), input.discountAmount ?? 0);
-    req.input("final", sql.Decimal(12, 2), input.finalAmount ?? input.coursePrice ?? 0);
-    req.input("currency", sql.Char(3), input.currencyCode ?? "INR");
+    let enrollmentId: string;
+    try {
+      const sReq = tx.request();
+      sReq.input("studentId", sql.BigInt, input.studentUserId);
+      const student = await sReq.query<{ ApprovalStatus: string | null; AccountStatus: string }>(`
+        SELECT sp.ApprovalStatus, u.AccountStatus
+        FROM dbo.NXA_Users u
+        JOIN dbo.NXA_StudentProfiles sp ON sp.UserId = u.UserId
+        WHERE u.UserId = @studentId AND u.DeletedAt IS NULL
+          AND NOT ${hasRole("u", [...ADMIN_ROLE_CODES, ...TEACHER_ROLE_CODES])}
+      `);
+      const s = student.recordset[0];
+      if (!s) throw new RecordNotFoundError("student", input.studentUserId);
+      if ((s.ApprovalStatus ?? "").toLowerCase() !== "approved") {
+        throw new AdminRuleViolationError("STUDENT_NOT_APPROVED", "The student must be approved before enrollment (BR-002)");
+      }
+      if (["suspended", "deactivated"].includes((s.AccountStatus ?? "").toLowerCase())) {
+        throw new AdminRuleViolationError("STUDENT_INACTIVE", `Cannot enroll a ${s.AccountStatus.toLowerCase()} account`);
+      }
 
-    const result = await req.query<{ EnrollmentId: number | bigint }>(`
-      INSERT INTO dbo.NXA_Enrollments (
-        StudentUserId, CourseId, BatchId, EnrollmentNumber, EnrollmentStatus,
-        CoursePrice, DiscountAmount, FinalAmount, CurrencyCode, EnrollmentSource,
-        ActivatedAt, CreatedAt, UpdatedAt
-      )
-      OUTPUT inserted.EnrollmentId
-      VALUES (
-        @studentId, @courseId, @batchId, @enrNum, @status,
-        @price, @discount, @final, @currency, 'ADMIN_MANUAL',
-        SYSUTCDATETIME(), SYSUTCDATETIME(), SYSUTCDATETIME()
-      )
-    `);
+      const cReq = tx.request();
+      cReq.input("courseId", sql.BigInt, input.courseId);
+      const course = await cReq.query<{ ListPrice: number | string; CurrencyCode: string }>(`
+        SELECT ListPrice, CurrencyCode FROM dbo.NXA_Courses WHERE CourseId = @courseId AND DeletedAt IS NULL
+      `);
+      const c = course.recordset[0];
+      if (!c) throw new RecordNotFoundError("course", input.courseId);
+      const price = Number(c.ListPrice);
 
-    const id = String(result.recordset[0]?.EnrollmentId);
-    return {
-      id,
-      studentUserId: input.studentUserId,
-      courseId: input.courseId,
-      ...(input.batchId ? { batchId: input.batchId } : {}),
-      enrollmentNumber: enrNum,
-      enrollmentStatus: "active",
-      coursePrice: input.coursePrice ?? 0,
-      discountAmount: input.discountAmount ?? 0,
-      finalAmount: input.finalAmount ?? input.coursePrice ?? 0,
-      currencyCode: input.currencyCode ?? "INR",
-      enrollmentSource: "ADMIN_MANUAL",
-      createdAt: new Date().toISOString(),
-    };
-  }
+      // Only a defined coupon may reduce the fee: NXA_Coupons.CouponCode -> its
+      // NXA_Discounts row. The coupon row is locked (UPDLOCK, HOLDLOCK) until
+      // commit, so concurrent redemptions of the same coupon are serialized and
+      // the usage and per-user limits cannot be exceeded by a race.
+      let discount = 0;
+      let appliedCoupon: {
+        couponId: string;
+        code: string;
+        discountId: string;
+        name: string;
+        type: string;
+        value: number;
+      } | null = null;
+      if (input.discountCode) {
+        const cpReq = tx.request();
+        cpReq.input("code", sql.VarChar(40), input.discountCode.trim().toUpperCase());
+        const cp = await cpReq.query<{
+          CouponId: number | bigint;
+          CouponCode: string;
+          CouponActive: boolean;
+          UsageLimit: number | null;
+          PerUserLimit: number | null;
+          UsageCount: number;
+          DiscountId: number | bigint;
+          DiscountName: string;
+          DiscountType: string;
+          DiscountValue: number | string;
+          StartsAt: Date | null;
+          EndsAt: Date | null;
+          DiscountActive: boolean;
+        }>(`
+          SELECT c.CouponId, c.CouponCode, c.IsActive AS CouponActive, c.UsageLimit, c.PerUserLimit, c.UsageCount,
+                 d.DiscountId, d.DiscountName, d.DiscountType, d.DiscountValue, d.StartsAt, d.EndsAt,
+                 d.IsActive AS DiscountActive
+          FROM dbo.NXA_Coupons c WITH (UPDLOCK, HOLDLOCK)
+          JOIN dbo.NXA_Discounts d ON d.DiscountId = c.DiscountId
+          WHERE c.CouponCode = @code
+        `);
+        const cpn = cp.recordset[0];
+        if (!cpn) throw new AdminRuleViolationError("DISCOUNT_NOT_FOUND", "No coupon exists with this code");
 
-  async setEnrollmentStatus(id: EntityId, status: string): Promise<EnrollmentAdminRecord> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("enrId", sql.BigInt, id);
-    req.input("status", sql.VarChar(25), status.toUpperCase());
+        let userRedemptions: number | null = null;
+        if (cpn.PerUserLimit != null) {
+          const rReq = tx.request();
+          rReq.input("couponId", sql.BigInt, cpn.CouponId);
+          rReq.input("studentId", sql.BigInt, input.studentUserId);
+          // Every recorded redemption counts: the allowed RedemptionStatus
+          // values are not visible to the application, so none is excluded.
+          const used = await rReq.query<{ cnt: number }>(`
+            SELECT COUNT(1) AS cnt FROM dbo.NXA_CouponRedemptions WITH (UPDLOCK, HOLDLOCK)
+            WHERE CouponId = @couponId AND StudentUserId = @studentId
+          `);
+          userRedemptions = Number(used.recordset[0]?.cnt ?? 0);
+        }
 
-    const result = await req.query(`
-      UPDATE dbo.NXA_Enrollments
-      SET EnrollmentStatus = @status, UpdatedAt = SYSUTCDATETIME()
-      WHERE EnrollmentId = @enrId
-    `);
+        const rejection = checkCouponUsable(
+          {
+            isActive: Boolean(cpn.CouponActive) && Boolean(cpn.DiscountActive),
+            startsAt: cpn.StartsAt,
+            endsAt: cpn.EndsAt,
+            usageLimit: cpn.UsageLimit,
+            usageCount: cpn.UsageCount,
+            perUserLimit: cpn.PerUserLimit,
+          },
+          new Date(),
+          userRedemptions,
+        );
+        if (rejection) throw new AdminRuleViolationError(rejection.code, rejection.message);
 
-    if ((result.rowsAffected[0] ?? 0) === 0) {
-      throw new RecordNotFoundError("enrollment", id);
+        const value = Number(cpn.DiscountValue);
+        discount = couponDiscountAmount(cpn.DiscountType, value, price);
+        if (discount <= 0) {
+          throw new AdminRuleViolationError("DISCOUNT_NOT_APPLICABLE", "This coupon gives no discount on this course");
+        }
+        appliedCoupon = {
+          couponId: String(cpn.CouponId),
+          code: cpn.CouponCode,
+          discountId: String(cpn.DiscountId),
+          name: cpn.DiscountName,
+          type: cpn.DiscountType,
+          value,
+        };
+      }
+
+      // Free access waives the full course price.
+      if (input.freeAccess) discount = price;
+
+      let capacityOverride: { reason: string; capacity: number; enrolled: number } | null = null;
+      if (input.batchId) {
+        const bReq = tx.request();
+        bReq.input("batchId", sql.BigInt, input.batchId);
+        const batch = await bReq.query<{ CourseId: number | bigint; Status: string }>(`
+          SELECT CourseId, Status FROM dbo.NXA_Batches WHERE BatchId = @batchId
+        `);
+        const b = batch.recordset[0];
+        if (!b) throw new RecordNotFoundError("batch", input.batchId);
+        if (String(b.CourseId) !== String(input.courseId)) {
+          throw new AdminRuleViolationError("BATCH_COURSE_MISMATCH", "The selected batch does not belong to the selected course");
+        }
+        if (["completed", "cancelled"].includes((b.Status ?? "").toLowerCase())) {
+          throw new AdminRuleViolationError("BATCH_CLOSED", `Cannot enroll into a ${b.Status.toLowerCase()} batch`);
+        }
+        // D6: the batch row is locked until commit, which serializes
+        // enrollments into this batch (Admin and self-enrollment alike).
+        // Counted exactly as the batch's CurrentEnrollments (every status
+        // except CANCELLED). NULL capacity = no limit.
+        const capReq = tx.request();
+        capReq.input("batchId", sql.BigInt, input.batchId);
+        const cap = await capReq.query<{ Capacity: number | null }>(`
+          SELECT Capacity FROM dbo.NXA_Batches WITH (UPDLOCK, HOLDLOCK) WHERE BatchId = @batchId
+        `);
+        const capacity = cap.recordset[0]?.Capacity;
+        if (capacity !== null && capacity !== undefined) {
+          const cntReq = tx.request();
+          cntReq.input("batchId", sql.BigInt, input.batchId);
+          const cnt = await cntReq.query<{ cnt: number }>(`
+            SELECT COUNT(1) AS cnt FROM dbo.NXA_Enrollments WITH (UPDLOCK, HOLDLOCK)
+            WHERE BatchId = @batchId AND UPPER(EnrollmentStatus) <> 'CANCELLED'
+          `);
+          const enrolled = Number(cnt.recordset[0]?.cnt ?? 0);
+          if (enrolled >= Number(capacity)) {
+            if (!input.capacityOverrideReason) {
+              throw new AdminRuleViolationError(
+                "BATCH_FULL",
+                `This batch is full (${enrolled} of ${capacity}). Give a capacity override reason to enroll anyway.`,
+                409,
+              );
+            }
+            capacityOverride = { reason: input.capacityOverrideReason, capacity: Number(capacity), enrolled };
+          }
+        }
+      }
+
+      // D4: every prerequisite course must have a COMPLETED enrollment, unless
+      // the Admin gives an override reason (recorded in the audit row).
+      const pReq = tx.request();
+      pReq.input("courseId", sql.BigInt, input.courseId);
+      pReq.input("studentId", sql.BigInt, input.studentUserId);
+      const missingPrereqs = await pReq.query<{ PrerequisiteCourseId: number | bigint; CourseCode: string; CourseName: string }>(`
+        SELECT p.PrerequisiteCourseId, c.CourseCode, c.CourseName
+        FROM dbo.NXA_CoursePrerequisites p
+        JOIN dbo.NXA_Courses c ON c.CourseId = p.PrerequisiteCourseId
+        WHERE p.CourseId = @courseId
+          AND NOT EXISTS (
+            SELECT 1 FROM dbo.NXA_Enrollments pe
+            WHERE pe.StudentUserId = @studentId AND pe.CourseId = p.PrerequisiteCourseId AND UPPER(pe.EnrollmentStatus) = 'COMPLETED'
+          )
+        ORDER BY c.CourseName ASC, p.PrerequisiteCourseId ASC
+      `);
+      // Every real row carries its (foreign key) PrerequisiteCourseId.
+      const missing = missingPrereqs.recordset.filter((r) => r.PrerequisiteCourseId !== null && r.PrerequisiteCourseId !== undefined);
+      let prerequisiteOverride: { reason: string; missingCourseIds: string[] } | null = null;
+      if (missing.length > 0) {
+        const names = missing.map((r) => `${r.CourseName} (${r.CourseCode})`).join(", ");
+        if (!input.prerequisiteOverrideReason) {
+          throw new AdminRuleViolationError(
+            "PREREQUISITES_NOT_MET",
+            `Prerequisite course(s) not completed: ${names}. Give a prerequisite override reason to enroll anyway.`,
+          );
+        }
+        prerequisiteOverride = {
+          reason: input.prerequisiteOverrideReason,
+          missingCourseIds: missing.map((r) => String(r.PrerequisiteCourseId)),
+        };
+      }
+
+      const dReq = tx.request();
+      dReq.input("studentId", sql.BigInt, input.studentUserId);
+      dReq.input("courseId", sql.BigInt, input.courseId);
+      const dup = await dReq.query(`
+        SELECT TOP 1 1 AS x FROM dbo.NXA_Enrollments WITH (UPDLOCK, HOLDLOCK)
+        WHERE StudentUserId = @studentId AND CourseId = @courseId AND UPPER(EnrollmentStatus) <> 'CANCELLED'
+      `);
+      if (dup.recordset.length > 0) throw new DuplicateRecordError("enrollment", "courseId", input.courseId);
+
+      const req = tx.request();
+      const enrollmentNumber = `ENR-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${randomBytes(4).toString("hex").toUpperCase()}`;
+      req.input("num", sql.VarChar(40), enrollmentNumber);
+      req.input("studentId", sql.BigInt, input.studentUserId);
+      req.input("courseId", sql.BigInt, input.courseId);
+      req.input("batchId", sql.BigInt, input.batchId ?? null);
+      req.input("status", sql.VarChar(25), input.status.toUpperCase());
+      req.input("price", sql.Decimal(12, 2), price);
+      req.input("discount", sql.Decimal(12, 2), discount);
+      req.input("final", sql.Decimal(12, 2), price - discount);
+      req.input("currency", sql.Char(3), c.CurrencyCode ?? "INR");
+      req.input("createdBy", sql.BigInt, input.createdByUserId);
+
+      const result = await req.query<{ EnrollmentId: number | bigint }>(`
+        INSERT INTO dbo.NXA_Enrollments (
+          StudentUserId, CourseId, BatchId, EnrollmentNumber, EnrollmentStatus,
+          CoursePrice, DiscountAmount, FinalAmount, CurrencyCode, EnrollmentSource,
+          CreatedByUserId, ActivatedAt, CreatedAt, UpdatedAt
+        )
+        OUTPUT inserted.EnrollmentId
+        VALUES (
+          @studentId, @courseId, @batchId, @num, @status,
+          @price, @discount, @final, @currency, 'ADMIN',
+          @createdBy, CASE WHEN @status = 'ACTIVE' THEN SYSUTCDATETIME() ELSE NULL END,
+          SYSUTCDATETIME(), SYSUTCDATETIME()
+        )
+      `);
+      enrollmentId = String(result.recordset[0]?.EnrollmentId);
+
+      // BR-007/PAY-010: the free-access grant is recorded as an override,
+      // authorized by the granting user, atomically with the enrollment.
+      let overrideId: string | null = null;
+      if (input.freeAccess) {
+        const oReq = tx.request();
+        oReq.input("enrollmentId", sql.BigInt, enrollmentId);
+        oReq.input("overrideType", sql.VarChar(30), FREE_ACCESS_OVERRIDE_TYPE);
+        oReq.input("reason", sql.NVarChar(500), input.audit.reason);
+        oReq.input("approvedBy", sql.BigInt, input.audit.actorUserId);
+        const ov = await oReq.query<{ EnrollmentOverrideId: number | bigint }>(`
+          INSERT INTO dbo.NXA_EnrollmentOverrides (EnrollmentId, OverrideType, Reason, ApprovedByUserId, CreatedAt)
+          OUTPUT inserted.EnrollmentOverrideId
+          VALUES (@enrollmentId, @overrideType, @reason, @approvedBy, SYSUTCDATETIME())
+        `);
+        overrideId = String(ov.recordset[0]?.EnrollmentOverrideId);
+      }
+
+      // The coupon redemption and its usage count are written in the same
+      // transaction as the enrollment. RedemptionStatus is not supplied: its
+      // allowed values (CHECK) are not visible to the application, so the
+      // column's table default applies.
+      let redemptionId: string | null = null;
+      if (appliedCoupon) {
+        const rdReq = tx.request();
+        rdReq.input("couponId", sql.BigInt, appliedCoupon.couponId);
+        rdReq.input("enrollmentId", sql.BigInt, enrollmentId);
+        rdReq.input("studentId", sql.BigInt, input.studentUserId);
+        rdReq.input("amount", sql.Decimal(12, 2), discount);
+        try {
+          const rd = await rdReq.query<{ CouponRedemptionId: number | bigint }>(`
+            INSERT INTO dbo.NXA_CouponRedemptions (CouponId, EnrollmentId, StudentUserId, DiscountAmount, RedeemedAt)
+            OUTPUT inserted.CouponRedemptionId
+            VALUES (@couponId, @enrollmentId, @studentId, @amount, SYSUTCDATETIME())
+          `);
+          redemptionId = String(rd.recordset[0]?.CouponRedemptionId);
+        } catch (err) {
+          if (isUniqueViolation(err)) throw new DuplicateRecordError("coupon redemption", "enrollmentId", enrollmentId);
+          throw err;
+        }
+
+        // Guarded increment: never exceeds UsageLimit even if the row changed.
+        const ucReq = tx.request();
+        ucReq.input("couponId", sql.BigInt, appliedCoupon.couponId);
+        const uc = await ucReq.query(`
+          UPDATE dbo.NXA_Coupons
+          SET UsageCount = UsageCount + 1
+          WHERE CouponId = @couponId AND IsActive = 1 AND (UsageLimit IS NULL OR UsageCount < UsageLimit)
+        `);
+        if ((uc.rowsAffected[0] ?? 0) !== 1) {
+          throw new AdminRuleViolationError("DISCOUNT_USAGE_LIMIT_REACHED", "This coupon code has reached its usage limit.");
+        }
+      }
+
+      await writeAuditLog(tx.request(), {
+        actorUserId: input.audit.actorUserId,
+        actionType: input.audit.actionType,
+        moduleCode: "ENROLLMENT_MGMT",
+        entityName: "Enrollment",
+        entityId: enrollmentId,
+        newValues: JSON.stringify({
+          enrollmentNumber,
+          studentUserId: input.studentUserId,
+          courseId: input.courseId,
+          batchId: input.batchId ?? null,
+          status: input.status,
+          requestedByUserId: input.audit.actorUserId,
+          coursePrice: price,
+          discountAmount: discount,
+          ...(appliedCoupon ? { coupon: { ...appliedCoupon, redemptionId } } : {}),
+          ...(input.freeAccess
+            ? { freeAccess: true, waivedAmount: price, overrideId, overrideType: FREE_ACCESS_OVERRIDE_TYPE }
+            : {}),
+          finalAmount: price - discount,
+          ...(input.audit.reason ? { reason: input.audit.reason } : {}),
+          ...(capacityOverride ? { capacityOverride } : {}),
+          ...(prerequisiteOverride ? { prerequisiteOverride } : {}),
+        }),
+      });
+
+      // Enrollment status history: the initial status of the new enrollment.
+      await writeEnrollmentStatusHistory(tx.request(), {
+        enrollmentId,
+        oldStatus: null,
+        newStatus: input.status.toUpperCase(),
+        changedByUserId: input.audit.actorUserId,
+        reason: input.audit.reason,
+      });
+
+      // PAY-013 financial audit history: the free-access waiver and any coupon redemption.
+      if (input.freeAccess && overrideId) {
+        await writeFinancialAuditHistory(tx.request(), {
+          entityType: "EnrollmentOverride",
+          entityId: overrideId,
+          actionType: input.audit.actionType,
+          performedByUserId: input.audit.actorUserId,
+          newValues: {
+            enrollmentId,
+            studentUserId: input.studentUserId,
+            overrideType: FREE_ACCESS_OVERRIDE_TYPE,
+            coursePrice: price,
+            waivedAmount: price,
+            finalAmount: price - discount,
+          },
+          reason: input.audit.reason,
+        });
+      }
+      if (appliedCoupon && redemptionId) {
+        await writeFinancialAuditHistory(tx.request(), {
+          entityType: "CouponRedemption",
+          entityId: redemptionId,
+          actionType: "REDEEM_COUPON",
+          performedByUserId: input.audit.actorUserId,
+          newValues: {
+            enrollmentId,
+            studentUserId: input.studentUserId,
+            couponId: appliedCoupon.couponId,
+            couponCode: appliedCoupon.code,
+            discountId: appliedCoupon.discountId,
+            coursePrice: price,
+            discountAmount: discount,
+            finalAmount: price - discount,
+          },
+        });
+      }
+
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // see insertStaffUser
+      }
+      throw err;
     }
 
-    const all = await this.findEnrollments({ studentId: undefined });
-    const enr = all.find((e) => e.id === id);
+    const created = await this.findEnrollmentById(enrollmentId);
+    if (!created) throw new RecordNotFoundError("enrollment", enrollmentId);
+    return created;
+  }
+
+  async setEnrollmentStatus(
+    id: EntityId,
+    status: EnrollmentStatusValue,
+    audit: TransactionalAudit,
+  ): Promise<EnrollmentAdminRecord> {
+    if (!/^[0-9]+$/.test(id)) throw new RecordNotFoundError("enrollment", id);
+    const pool = await this.getPool();
+    const tx = pool.transaction();
+    await tx.begin();
+
+    try {
+      const cur = tx.request();
+      cur.input("enrId", sql.BigInt, id);
+      const before = await cur.query<{ EnrollmentStatus: string; ActivatedAt: Date | null }>(`
+        SELECT EnrollmentStatus, ActivatedAt FROM dbo.NXA_Enrollments WITH (UPDLOCK) WHERE EnrollmentId = @enrId
+      `);
+      const oldStatus = before.recordset[0]?.EnrollmentStatus;
+      if (oldStatus === undefined) throw new RecordNotFoundError("enrollment", id);
+      if (oldStatus.toLowerCase() === status) {
+        throw new AdminRuleViolationError("STATUS_UNCHANGED", `Enrollment is already ${status}`);
+      }
+      // BR-004 / CL-001 item 8: paid access comes from payment verification,
+      // free access from the audited override. This endpoint may only resume
+      // a suspended enrollment that one of those already activated.
+      if (status === "active" && !(oldStatus.toUpperCase() === "SUSPENDED" && before.recordset[0]?.ActivatedAt)) {
+        throw new AdminRuleViolationError(
+          "ACTIVATION_REQUIRES_PAYMENT",
+          "Enrollment access is granted only by a verified payment, a recorded manual payment or a free-access override. Manual activation can only resume a suspended enrollment that was already activated.",
+        );
+      }
+
+      const req = tx.request();
+      req.input("enrId", sql.BigInt, id);
+      req.input("status", sql.VarChar(25), status.toUpperCase());
+      // Same timestamp semantics as the enrollment module's setStatus.
+      await req.query(`
+        UPDATE dbo.NXA_Enrollments
+        SET EnrollmentStatus = @status,
+            ActivatedAt = CASE WHEN @status = 'ACTIVE' AND ActivatedAt IS NULL THEN SYSUTCDATETIME() ELSE ActivatedAt END,
+            CompletedAt = CASE WHEN @status = 'COMPLETED' AND CompletedAt IS NULL THEN SYSUTCDATETIME() ELSE CompletedAt END,
+            UpdatedAt = SYSUTCDATETIME()
+        WHERE EnrollmentId = @enrId
+      `);
+
+      await writeAuditLog(tx.request(), {
+        actorUserId: audit.actorUserId,
+        actionType: audit.actionType,
+        moduleCode: "ENROLLMENT_MGMT",
+        entityName: "Enrollment",
+        entityId: id,
+        oldValues: JSON.stringify({ status: oldStatus.toLowerCase() }),
+        newValues: JSON.stringify({ status, ...(audit.reason ? { reason: audit.reason } : {}) }),
+      });
+
+      // A no-op change was refused above (STATUS_UNCHANGED), so this is a real transition.
+      await writeEnrollmentStatusHistory(tx.request(), {
+        enrollmentId: id,
+        oldStatus,
+        newStatus: status.toUpperCase(),
+        changedByUserId: audit.actorUserId,
+        reason: audit.reason,
+      });
+
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // see insertStaffUser
+      }
+      throw err;
+    }
+
+    const enr = await this.findEnrollmentById(id);
     if (!enr) throw new RecordNotFoundError("enrollment", id);
     return enr;
   }
@@ -892,6 +1786,16 @@ export class SqlServerAdminRepository implements AdminRepository {
       req.input("moduleCode", sql.VarChar(50), filter.moduleCode);
       conditions.push("al.ModuleCode = @moduleCode");
     }
+    const start = filter?.startDate ? new Date(filter.startDate) : undefined;
+    if (start && !Number.isNaN(start.getTime())) {
+      req.input("startDate", sql.DateTime2, start);
+      conditions.push("al.CreatedAt >= @startDate");
+    }
+    const end = filter?.endDate ? new Date(filter.endDate) : undefined;
+    if (end && !Number.isNaN(end.getTime())) {
+      req.input("endDate", sql.DateTime2, end);
+      conditions.push("al.CreatedAt <= @endDate");
+    }
 
     const result = await req.query<{
       AuditLogId: number | bigint;
@@ -913,7 +1817,7 @@ export class SqlServerAdminRepository implements AdminRepository {
         al.AuditLogId,
         al.ActorUserId,
         u.FullName AS ActorName,
-        u.Role AS ActorRole,
+        CASE WHEN u.UserId IS NULL THEN NULL ELSE ${roleCodeOf("u")} END AS ActorRole,
         al.ActionType,
         al.ModuleCode,
         al.EntityName,
@@ -963,30 +1867,7 @@ export class SqlServerAdminRepository implements AdminRepository {
     details?: string | undefined;
   }): Promise<AuditLogRecord> {
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("actorId", sql.BigInt, log.actorUserId);
-    req.input("action", sql.VarChar(80), log.actionType);
-    req.input("module", sql.VarChar(50), log.moduleCode);
-    req.input("ename", sql.VarChar(150), log.entityName);
-    req.input("eid", sql.VarChar(100), log.entityId);
-    req.input("oldVal", sql.NVarChar(sql.MAX), log.oldValues ?? null);
-    req.input("newVal", sql.NVarChar(sql.MAX), log.newValues ?? null);
-    req.input("ip", sql.VarChar(45), log.ipAddress ?? null);
-    req.input("ua", sql.NVarChar(500), log.userAgent ?? null);
-
-    const result = await req.query<{ AuditLogId: number | bigint }>(`
-      INSERT INTO dbo.NXA_AuditLogs (
-        ActorUserId, ActionType, ModuleCode, EntityName, EntityId,
-        OldValues, NewValues, IpAddress, UserAgent, CorrelationId, CreatedAt
-      )
-      OUTPUT inserted.AuditLogId
-      VALUES (
-        @actorId, @action, @module, @ename, @eid,
-        @oldVal, @newVal, @ip, @ua, NEWID(), SYSUTCDATETIME()
-      )
-    `);
-
-    const id = String(result.recordset[0]?.AuditLogId);
+    const id = await writeAuditLog(pool.request(), log);
     return {
       id,
       timestamp: new Date().toISOString(),
@@ -1006,8 +1887,9 @@ export class SqlServerAdminRepository implements AdminRepository {
   // Settings
   async getInstituteSettings(): Promise<InstituteSettingsRecord> {
     const pool = await this.getPool();
+    // Secret-flagged rows never leave the repository; only known keys are mapped.
     const result = await pool.request().query<{ SettingKey: string; SettingValue: string }>(`
-      SELECT SettingKey, SettingValue FROM dbo.NXA_InstituteSettings
+      SELECT SettingKey, SettingValue FROM dbo.NXA_InstituteSettings WHERE IsSecret = 0
     `);
 
     const map = new Map<string, string>();
@@ -1015,34 +1897,42 @@ export class SqlServerAdminRepository implements AdminRepository {
       map.set(r.SettingKey, r.SettingValue);
     }
 
-    return {
-      instituteName: map.get("instituteName") ?? "Nexelvoria Academy",
-      tagline: map.get("tagline") ?? "Empowering Next-Gen Tech Leaders",
-      supportEmail: map.get("supportEmail") ?? "contact@nexelvoria.in",
-      supportPhone: map.get("supportPhone") ?? "+91 80000 12345",
-      whatsappNumber: map.get("whatsappNumber") ?? "+91 80000 12345",
-      address: map.get("address") ?? "Hitec City, Hyderabad, Telangana - 500081",
-      timezone: map.get("timezone") ?? "Asia/Kolkata",
-      minAttendancePercentage: Number(map.get("minAttendancePercentage") ?? 75),
-      isSmsEnabled: map.get("isSmsEnabled") === "true",
-      currencySymbol: map.get("currencySymbol") ?? "₹",
-      gstNumber: map.get("gstNumber") ?? "36AAAAA0000A1Z5",
-    };
+    return toInstituteSettings(map);
   }
 
+  /**
+   * Upserts only the supplied keys, in one transaction with an audit record
+   * carrying the old and new values of exactly the keys that changed.
+   */
   async saveInstituteSettings(
     settings: Partial<InstituteSettingsRecord>,
-    updatedByUserId?: EntityId,
+    updatedByUserId: EntityId,
   ): Promise<InstituteSettingsRecord> {
+    const entries = Object.entries(settings).filter(
+      (e): e is [string, string | number | boolean] => e[1] !== undefined && e[0] !== "updatedAt",
+    );
     const pool = await this.getPool();
+    const tx = pool.transaction();
+    await tx.begin();
 
-    for (const [k, v] of Object.entries(settings)) {
-      if (v !== undefined) {
-        const req = pool.request();
+    try {
+      const cur = await tx.request().query<{ SettingKey: string; SettingValue: string }>(`
+        SELECT SettingKey, SettingValue FROM dbo.NXA_InstituteSettings WITH (UPDLOCK)
+      `);
+      const before = new Map(cur.recordset.map((r) => [r.SettingKey, r.SettingValue]));
+      const oldValues: Record<string, string | null> = {};
+      const newValues: Record<string, string> = {};
+
+      for (const [k, v] of entries) {
+        const value = String(v);
+        if (before.get(k) === value) continue;
+        oldValues[k] = before.get(k) ?? null;
+        newValues[k] = value;
+
+        const req = tx.request();
         req.input("key", sql.VarChar(150), k);
-        req.input("val", sql.NVarChar(sql.MAX), String(v));
-        req.input("userId", sql.BigInt, updatedByUserId ?? 1);
-
+        req.input("val", sql.NVarChar(sql.MAX), value);
+        req.input("userId", sql.BigInt, updatedByUserId);
         await req.query(`
           MERGE dbo.NXA_InstituteSettings AS target
           USING (SELECT @key AS SettingKey) AS source
@@ -1054,94 +1944,34 @@ export class SqlServerAdminRepository implements AdminRepository {
             VALUES (@key, @val, 'string', 0, @userId, SYSUTCDATETIME());
         `);
       }
+
+      if (Object.keys(newValues).length > 0) {
+        await writeAuditLog(tx.request(), {
+          actorUserId: updatedByUserId,
+          actionType: "UPDATE_SETTINGS",
+          moduleCode: "INSTITUTE_SETTINGS",
+          entityName: "InstituteSettings",
+          entityId: "institute",
+          oldValues: JSON.stringify(oldValues),
+          newValues: JSON.stringify(newValues),
+        });
+      }
+
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // see insertStaffUser
+      }
+      throw err;
     }
 
     return this.getInstituteSettings();
   }
 
-  async getSystemConfig(): Promise<SystemConfigRecord> {
-    return {
-      institute: {
-        name: "Nexelvoria Academy",
-        code: "NXA",
-        affiliation: "State Technical Board & Global Cloud Consortium",
-        supportEmail: "contact@nexelvoria.in",
-        supportPhone: "+91 80000 12345",
-        whatsappNumber: "+91 80000 12345",
-        address: "Hitec City, Hyderabad, Telangana",
-        website: "https://nexelvoria.in",
-        gstNumber: "36AAAAA0000A1Z5",
-        currency: "INR",
-        timezone: "Asia/Kolkata",
-      },
-      branding: {
-        logoUrl: "/logo.png",
-        faviconUrl: "/favicon.ico",
-        primaryColor: "#4f46e5",
-        secondaryColor: "#06b6d4",
-        tagline: "Empowering Next-Gen Tech Leaders",
-        motto: "Learn. Build. Excel.",
-      },
-      academic: {
-        currentAcademicYear: "2026-2027",
-        activeTerm: "Spring 2026",
-        isRegistrationOpen: true,
-        isCatalogPublic: true,
-        maxBatchCapacity: 40,
-        minAttendancePercentage: 75,
-        assignmentGracePeriodDays: 2,
-        passPercentage: 60,
-      },
-      paymentGateway: {
-        provider: "razorpay",
-        keyId: "rzp_test_key",
-        keySecretMasked: "••••••••••••",
-        webhookSecretMasked: "••••••••••••",
-        isLiveMode: false,
-        autoReconcile: true,
-      },
-      emailSms: {
-        smtpHost: "smtp.mailtrap.io",
-        smtpPort: 587,
-        smtpUser: "nexelvoria-auth",
-        smtpPasswordMasked: "••••••••••••",
-        senderName: "Nexelvoria Academy",
-        senderEmail: "notifications@nexelvoria.in",
-        isSmsEnabled: false,
-        smsProvider: "twilio",
-        smsApiKeyMasked: "••••••••••••",
-      },
-      notifications: {
-        emailOnAdmission: true,
-        emailOnPayment: true,
-        emailOnExamResult: true,
-        smsOnClassReminder: false,
-        pushAnnouncements: true,
-      },
-      security: {
-        sessionTimeoutMinutes: 60,
-        enforceTwoFactor: false,
-        maxFailedLogins: 5,
-        passwordExpiryDays: 90,
-        requireSpecialChars: true,
-      },
-      maintenance: {
-        isMaintenanceMode: false,
-        message: "System is undergoing scheduled maintenance.",
-        allowedIps: "127.0.0.1, ::1",
-      },
-    };
-  }
-
-  async saveSystemConfig(
-    _config: Partial<SystemConfigRecord>,
-    _updatedByUserId?: EntityId,
-  ): Promise<SystemConfigRecord> {
-    return this.getSystemConfig();
-  }
-
   // Refunds
-  async findRefunds(status?: string | undefined): Promise<RefundRecord[]> {
+  async findRefunds(status?: string | undefined, refundId?: EntityId): Promise<RefundRecord[]> {
     const pool = await this.getPool();
     const req = pool.request();
     const conditions: string[] = ["1=1"];
@@ -1149,6 +1979,10 @@ export class SqlServerAdminRepository implements AdminRepository {
     if (status) {
       req.input("status", sql.VarChar(20), status.toUpperCase());
       conditions.push("UPPER(r.RefundStatus) = @status");
+    }
+    if (refundId !== undefined) {
+      req.input("refundId", sql.BigInt, refundId);
+      conditions.push("r.RefundId = @refundId");
     }
 
     const result = await req.query<{
@@ -1164,9 +1998,16 @@ export class SqlServerAdminRepository implements AdminRepository {
       ApprovedAt: Date | null;
       ApprovedBySuperAdminUserId: number | bigint | null;
       CompletedAt: Date | null;
+      RequesterName: string | null;
+      RequesterEmail: string | null;
     }>(`
-      SELECT *
+      SELECT
+        r.RefundId, r.RefundReference, r.TransactionId, r.RequestedByUserId, r.Amount,
+        r.Reason, r.RefundStatus, r.GatewayRefundId, r.RequestedAt, r.ApprovedAt,
+        r.ApprovedBySuperAdminUserId, r.CompletedAt,
+        u.FullName AS RequesterName, u.Email AS RequesterEmail
       FROM dbo.NXA_Refunds r
+      LEFT JOIN dbo.NXA_Users u ON u.UserId = r.RequestedByUserId
       WHERE ${conditions.join(" AND ")}
       ORDER BY r.RequestedAt DESC
     `);
@@ -1176,6 +2017,8 @@ export class SqlServerAdminRepository implements AdminRepository {
       refundReference: r.RefundReference,
       ...(r.TransactionId ? { transactionId: String(r.TransactionId) } : {}),
       requestedByUserId: String(r.RequestedByUserId),
+      ...(r.RequesterName ? { requestedByName: r.RequesterName } : {}),
+      ...(r.RequesterEmail ? { requestedByEmail: r.RequesterEmail } : {}),
       amount: Number(r.Amount),
       reason: r.Reason,
       refundStatus: r.RefundStatus.toLowerCase(),
@@ -1187,45 +2030,115 @@ export class SqlServerAdminRepository implements AdminRepository {
     }));
   }
 
+  /**
+   * Decides a PENDING refund (BR-006). Only a PENDING refund can be decided;
+   * the status read takes an update lock so two Super Admins cannot both
+   * decide it. ApprovedAt / ApprovedBySuperAdminUserId are stamped only on
+   * approval (the columns mean "approved"); for a rejection the decider, time
+   * and reason live in the audit record written in the same transaction.
+   * NXA_Refunds has no remarks column, so remarks are kept in the audit only.
+   * No gateway refund is triggered: an approved refund stays APPROVED until
+   * the payment module completes it.
+   */
   async updateRefundStatus(
     id: EntityId,
-    status: string,
+    status: "approved" | "rejected",
     decidedByUserId: EntityId,
-    _remarks?: string | undefined,
+    remarks?: string | undefined,
   ): Promise<RefundRecord> {
+    requireNumericIds({ refund: id });
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("id", sql.BigInt, id);
-    req.input("status", sql.VarChar(20), status.toUpperCase());
-    req.input("deciderId", sql.BigInt, decidedByUserId);
+    const tx = pool.transaction();
+    await tx.begin();
 
-    const result = await req.query(`
-      UPDATE dbo.NXA_Refunds
-      SET RefundStatus = @status,
-          ApprovedAt = SYSUTCDATETIME(),
-          ApprovedBySuperAdminUserId = @deciderId
-      WHERE RefundId = @id
-    `);
+    try {
+      const cur = tx.request();
+      cur.input("id", sql.BigInt, id);
+      const before = await cur.query<{ RefundStatus: string; Amount: number }>(`
+        SELECT RefundStatus, Amount FROM dbo.NXA_Refunds WITH (UPDLOCK) WHERE RefundId = @id
+      `);
+      const row = before.recordset[0];
+      if (!row) throw new RecordNotFoundError("refund", id);
+      const oldStatus = row.RefundStatus.toUpperCase();
+      if (oldStatus !== "PENDING") {
+        throw new AdminRuleViolationError(
+          "REFUND_ALREADY_DECIDED",
+          `This refund is already ${oldStatus.toLowerCase()} and cannot be decided again`,
+          409,
+        );
+      }
 
-    if ((result.rowsAffected[0] ?? 0) === 0) {
-      throw new RecordNotFoundError("refund", id);
+      const req = tx.request();
+      req.input("id", sql.BigInt, id);
+      req.input("status", sql.VarChar(20), status.toUpperCase());
+      req.input("deciderId", sql.BigInt, decidedByUserId);
+      await req.query(`
+        UPDATE dbo.NXA_Refunds
+        SET RefundStatus = @status,
+            ApprovedAt = CASE WHEN @status = 'APPROVED' THEN SYSUTCDATETIME() ELSE ApprovedAt END,
+            ApprovedBySuperAdminUserId = CASE WHEN @status = 'APPROVED' THEN @deciderId ELSE ApprovedBySuperAdminUserId END
+        WHERE RefundId = @id AND UPPER(RefundStatus) = 'PENDING'
+      `);
+
+      await writeAuditLog(tx.request(), {
+        actorUserId: decidedByUserId,
+        actionType: status === "approved" ? "APPROVE_REFUND" : "REJECT_REFUND",
+        moduleCode: "FINANCE",
+        entityName: "Refund",
+        entityId: id,
+        oldValues: JSON.stringify({ status: "pending" }),
+        newValues: JSON.stringify({
+          status,
+          amount: Number(row.Amount),
+          ...(remarks ? { remarks } : {}),
+        }),
+      });
+
+      // PAY-013. An approved refund stays APPROVED: nothing is marked completed.
+      await writeFinancialAuditHistory(tx.request(), {
+        entityType: "Refund",
+        entityId: id,
+        actionType: status === "approved" ? "APPROVE_REFUND" : "REJECT_REFUND",
+        performedByUserId: decidedByUserId,
+        oldValues: { refundStatus: row.RefundStatus },
+        newValues: { refundStatus: status.toUpperCase(), amount: Number(row.Amount) },
+        reason: remarks,
+      });
+
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // see insertStaffUser
+      }
+      throw err;
     }
 
-    const all = await this.findRefunds();
-    const updated = all.find((r) => r.id === id);
+    const [updated] = await this.findRefunds(undefined, id);
     if (!updated) throw new RecordNotFoundError("refund", id);
     return updated;
   }
 
   // Financial Overrides
-  async findFinancialOverrides(status?: string | undefined): Promise<FinancialOverrideRecord[]> {
+  /**
+   * Read-only history of NXA_EnrollmentOverrides with the real enrollment,
+   * student and course they apply to. Amounts come from the enrollment
+   * (CoursePrice, FinalAmount, DiscountAmount). ApprovedByUserId is NOT NULL:
+   * it is the user who granted (and so authorized) the override, reported as
+   * `requestedByAdminId`/`requestedByAdminName`; `decidedAt` is the recording
+   * time. Every row is "approved"; "pending" and "rejected" match nothing.
+   */
+  async findFinancialOverrides(status?: string | undefined, overrideId?: EntityId): Promise<FinancialOverrideRecord[]> {
     const pool = await this.getPool();
     const req = pool.request();
     const conditions: string[] = ["1=1"];
 
-    if (status) {
-      req.input("status", sql.VarChar(30), status);
-      conditions.push("fo.OverrideType = @status");
+    const wanted = status?.toLowerCase();
+    if (wanted && wanted !== "approved") conditions.push("1=0");
+    if (overrideId !== undefined) {
+      req.input("overrideId", sql.BigInt, overrideId);
+      conditions.push("fo.EnrollmentOverrideId = @overrideId");
     }
 
     const result = await req.query<{
@@ -1233,66 +2146,187 @@ export class SqlServerAdminRepository implements AdminRepository {
       EnrollmentId: number | bigint;
       OverrideType: string;
       Reason: string;
-      ApprovedByUserId: number | bigint | null;
+      ApprovedByUserId: number | bigint;
+      ApprovedByName: string | null;
       CreatedAt: Date;
+      StudentUserId: number | bigint | null;
+      StudentName: string | null;
+      StudentEmail: string | null;
+      CourseId: number | bigint | null;
+      CourseTitle: string | null;
+      CoursePrice: number | null;
+      DiscountAmount: number | null;
+      FinalAmount: number | null;
     }>(`
-      SELECT *
+      SELECT
+        fo.EnrollmentOverrideId, fo.EnrollmentId, fo.OverrideType, fo.Reason,
+        fo.ApprovedByUserId, au.FullName AS ApprovedByName, fo.CreatedAt,
+        e.StudentUserId, u.FullName AS StudentName, u.Email AS StudentEmail,
+        e.CourseId, c.CourseName AS CourseTitle,
+        e.CoursePrice, e.DiscountAmount, e.FinalAmount
       FROM dbo.NXA_EnrollmentOverrides fo
+      LEFT JOIN dbo.NXA_Enrollments e ON e.EnrollmentId = fo.EnrollmentId
+      LEFT JOIN dbo.NXA_Users u ON u.UserId = e.StudentUserId
+      LEFT JOIN dbo.NXA_Users au ON au.UserId = fo.ApprovedByUserId
+      LEFT JOIN dbo.NXA_Courses c ON c.CourseId = e.CourseId
       WHERE ${conditions.join(" AND ")}
       ORDER BY fo.CreatedAt DESC
     `);
 
     return result.recordset.map((r) => ({
       id: String(r.EnrollmentOverrideId),
-      studentId: "1",
-      courseId: "1",
       enrollmentId: String(r.EnrollmentId),
-      originalAmountINR: 45000,
-      proposedAmountINR: 30000,
-      discountOrWaiverINR: 15000,
+      studentId: r.StudentUserId != null ? String(r.StudentUserId) : "",
+      ...(r.StudentName ? { studentName: r.StudentName } : {}),
+      ...(r.StudentEmail ? { studentEmail: r.StudentEmail } : {}),
+      courseId: r.CourseId != null ? String(r.CourseId) : "",
+      ...(r.CourseTitle ? { courseTitle: r.CourseTitle } : {}),
+      originalAmountINR: Number(r.CoursePrice ?? 0),
+      proposedAmountINR: Number(r.FinalAmount ?? 0),
+      discountOrWaiverINR: Number(r.DiscountAmount ?? 0),
       adjustmentType: r.OverrideType,
       reason: r.Reason,
-      requestedByAdminId: "1",
+      requestedByAdminId: String(r.ApprovedByUserId),
+      ...(r.ApprovedByName ? { requestedByAdminName: r.ApprovedByName } : {}),
       requestedAt: r.CreatedAt.toISOString(),
-      status: r.ApprovedByUserId ? "approved" : "pending",
-      ...(r.ApprovedByUserId ? { decidedBySuperAdminId: String(r.ApprovedByUserId) } : {}),
-      ...(r.ApprovedByUserId ? { decidedAt: r.CreatedAt.toISOString() } : {}),
+      status: "approved" as const,
+      decidedAt: r.CreatedAt.toISOString(),
     }));
   }
 
+  /**
+   * NXA_EnrollmentOverrides.ApprovedByUserId is NOT NULL: an override is
+   * authorized by the user who records it, so no override is ever waiting for
+   * a decision. Approving an existing override is a 409, rejecting is a 422,
+   * and nothing is ever written.
+   */
   async updateFinancialOverride(
     id: EntityId,
     status: "approved" | "rejected",
-    decidedByUserId: EntityId,
-    remarks?: string | undefined,
+    _decidedByUserId: EntityId,
+    _remarks?: string | undefined,
   ): Promise<FinancialOverrideRecord> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("id", sql.BigInt, id);
-    req.input("deciderId", sql.BigInt, decidedByUserId);
+    requireNumericIds({ "financial override": id });
+    if (status === "rejected") {
+      throw new AdminRuleViolationError(
+        "OVERRIDE_REJECTION_UNSUPPORTED",
+        "A financial override is authorized when it is granted and cannot be rejected afterwards. No change was made.",
+      );
+    }
 
-    await req.query(`
-      UPDATE dbo.NXA_EnrollmentOverrides
-      SET ApprovedByUserId = @deciderId
-      WHERE EnrollmentOverrideId = @id
-    `);
+    const [existing] = await this.findFinancialOverrides(undefined, id);
+    if (!existing) throw new RecordNotFoundError("financial override", id);
+    throw new AdminRuleViolationError(
+      "OVERRIDE_ALREADY_DECIDED",
+      "This financial override was approved when it was granted. No change was made.",
+      409,
+    );
+  }
+
+  // Student accounts (ADM-003)
+  /**
+   * Same end state as self-registration (sqlserver-registration.repository):
+   * AccountStatus 'pending', EmailVerified/MobileVerified 0, profile
+   * ApprovalStatus 'pending', `student` role. Unlike registration, a missing
+   * `student` role is an error rather than a silent skip, and the audit
+   * record is part of the transaction.
+   */
+  async createStudentUser(input: {
+    name: string;
+    email: string;
+    mobile: string;
+    passwordHash: string;
+    createdByUserId: EntityId;
+    collegeName?: string | undefined;
+    degree?: string | undefined;
+    branch?: string | undefined;
+    passingYear?: number | undefined;
+    interestedCourseId?: EntityId | undefined;
+    dateOfBirth?: string | undefined;
+    gender?: string | undefined;
+    city?: string | undefined;
+    state?: string | undefined;
+  }): Promise<AdminCreatedStudent> {
+    if (input.interestedCourseId !== undefined && !/^[0-9]+$/.test(input.interestedCourseId)) {
+      throw new AdminRuleViolationError("COURSE_NOT_FOUND", "The selected course does not exist");
+    }
+    const createdAt = new Date();
+
+    const userId = await this.insertStaffUser(
+      {
+        name: input.name,
+        email: input.email,
+        mobile: input.mobile,
+        passwordHash: input.passwordHash,
+        assignedByUserId: input.createdByUserId,
+        roleCode: "student",
+        accountStatus: "pending",
+      },
+      async (tx, newUserId) => {
+        if (input.interestedCourseId !== undefined) {
+          const cReq = tx.request();
+          cReq.input("courseId", sql.BigInt, input.interestedCourseId);
+          const course = await cReq.query(
+            `SELECT TOP 1 1 AS x FROM dbo.NXA_Courses WHERE CourseId = @courseId AND DeletedAt IS NULL`,
+          );
+          if (course.recordset.length === 0) {
+            throw new AdminRuleViolationError("COURSE_NOT_FOUND", "The selected course does not exist");
+          }
+        }
+
+        const pReq = tx.request();
+        pReq.input("userId", sql.BigInt, newUserId);
+        pReq.input("collegeName", sql.NVarChar(200), input.collegeName ?? null);
+        pReq.input("degree", sql.NVarChar(100), input.degree ?? null);
+        pReq.input("branch", sql.NVarChar(100), input.branch ?? null);
+        pReq.input("passingYear", sql.SmallInt, input.passingYear ?? null);
+        pReq.input("interestedCourseId", sql.BigInt, input.interestedCourseId ?? null);
+        pReq.input("dateOfBirth", sql.Date, input.dateOfBirth ? new Date(`${input.dateOfBirth}T00:00:00Z`) : null);
+        pReq.input("gender", sql.VarChar(30), input.gender ?? null);
+        pReq.input("city", sql.NVarChar(100), input.city ?? null);
+        pReq.input("state", sql.NVarChar(100), input.state ?? null);
+        await pReq.query(`
+          INSERT INTO dbo.NXA_StudentProfiles (
+            UserId, CollegeName, Degree, Branch, PassingYear, InterestedCourseId,
+            DateOfBirth, Gender, City, State, ApprovalStatus, CreatedAt
+          )
+          VALUES (
+            @userId, @collegeName, @degree, @branch, @passingYear, @interestedCourseId,
+            @dateOfBirth, @gender, @city, @state, 'pending', SYSUTCDATETIME()
+          )
+        `);
+
+        await writeAuditLog(tx.request(), {
+          actorUserId: input.createdByUserId,
+          actionType: "CREATE_STUDENT",
+          moduleCode: "STUDENT_MGMT",
+          entityName: "Student",
+          entityId: newUserId,
+          newValues: JSON.stringify({
+            name: input.name.trim(),
+            email: input.email.trim().toLowerCase(),
+            mobile: input.mobile.trim(),
+            accountStatus: "pending",
+            approvalStatus: "pending",
+            emailVerified: false,
+            mobileVerified: false,
+            ...(input.interestedCourseId ? { interestedCourseId: input.interestedCourseId } : {}),
+          }),
+        });
+      },
+    );
 
     return {
-      id,
-      studentId: "1",
-      courseId: "1",
-      enrollmentId: "1",
-      originalAmountINR: 45000,
-      proposedAmountINR: 30000,
-      discountOrWaiverINR: 15000,
-      adjustmentType: "merit_scholarship",
-      reason: "Merit waiver",
-      requestedByAdminId: "1",
-      requestedAt: new Date().toISOString(),
-      status,
-      decidedAt: new Date().toISOString(),
-      decidedBySuperAdminId: decidedByUserId,
-      ...(remarks ? { superAdminRemarks: remarks } : {}),
+      id: userId,
+      name: input.name.trim(),
+      email: input.email.trim().toLowerCase(),
+      mobile: input.mobile.trim(),
+      accountStatus: "pending",
+      approvalStatus: "pending",
+      isEmailVerified: false,
+      isMobileVerified: false,
+      accountState: "pending_verification",
+      createdAt: createdAt.toISOString(),
     };
   }
 
@@ -1320,71 +2354,45 @@ export class SqlServerAdminRepository implements AdminRepository {
       description: r.Description ?? "",
       isSystemRole: Boolean(r.IsSystemRole),
       isActive: Boolean(r.IsActive),
-      permissions: ["view_dashboard", "manage_students"],
+      permissions: [],
       createdAt: r.CreatedAt.toISOString(),
     }));
   }
 
-  async createRole(role: {
-    roleCode: string;
-    roleName: string;
-    description: string;
-    permissions: string[];
-  }): Promise<GlobalRoleRecord> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("code", sql.VarChar(40), role.roleCode);
-    req.input("name", sql.NVarChar(100), role.roleName);
-    req.input("desc", sql.NVarChar(500), role.description);
-
-    const result = await req.query<{ RoleId: number }>(`
-      INSERT INTO dbo.NXA_Roles (RoleCode, RoleName, Description, IsSystemRole, IsActive, CreatedAt)
-      OUTPUT inserted.RoleId
-      VALUES (@code, @name, @desc, 0, 1, SYSUTCDATETIME())
-    `);
-
-    const id = String(result.recordset[0]?.RoleId);
-    return {
-      id,
-      roleCode: role.roleCode,
-      roleName: role.roleName,
-      description: role.description,
-      isSystemRole: false,
-      isActive: true,
-      permissions: role.permissions,
-      createdAt: new Date().toISOString(),
-    };
-  }
-
-  async updateRolePermissions(roleId: EntityId, permissions: string[]): Promise<GlobalRoleRecord> {
-    const roles = await this.findRoles();
-    const found = roles.find((r) => r.id === roleId);
-    if (!found) throw new RecordNotFoundError("role", roleId);
-
-    found.permissions = permissions;
-    return found;
-  }
-
-  async unlockUserAccount(userId: EntityId): Promise<void> {
-    const pool = await this.getPool();
-    const req = pool.request();
-    req.input("userId", sql.BigInt, userId);
-
-    await req.query(`
-      UPDATE dbo.NXA_Users
-      SET AccountStatus = 'ACTIVE', UpdatedAt = SYSUTCDATETIME()
-      WHERE UserId = @userId
-    `);
+  async unlockUserAccount(userId: EntityId, audit?: StaffAudit): Promise<void> {
+    if (!/^[0-9]+$/.test(userId)) throw new RecordNotFoundError("user", userId);
+    await this.inTeacherTransaction(async (tx) => {
+      // Unlock clears the credential lockout only. It must NOT change
+      // AccountStatus: activating here would bypass approval and suspension.
+      // Only an account with something to clear is updated and audited.
+      const req = tx.request();
+      req.input("userId", sql.BigInt, userId);
+      const result = await req.query(`
+        UPDATE dbo.NXA_Users
+        SET FailedLoginAttempts = 0, IsLocked = 0, LockoutUntil = NULL, UpdatedAt = SYSUTCDATETIME()
+        WHERE UserId = @userId AND DeletedAt IS NULL
+          AND (ISNULL(FailedLoginAttempts, 0) <> 0 OR ISNULL(IsLocked, 0) <> 0 OR LockoutUntil IS NOT NULL)
+      `);
+      if ((result.rowsAffected[0] ?? 0) > 0) {
+        await writeStaffAudit(tx, audit, userId);
+        return;
+      }
+      const exists = await tx
+        .request()
+        .input("userId", sql.BigInt, userId)
+        .query(`SELECT 1 AS x FROM dbo.NXA_Users WHERE UserId = @userId AND DeletedAt IS NULL`);
+      if (exists.recordset.length === 0) throw new RecordNotFoundError("user", userId);
+    });
   }
 
   async findTeachers(filter?: { search?: string | undefined; status?: string | undefined }): Promise<Teacher[]> {
     const pool = await this.getPool();
     const req = pool.request();
-    const conditions: string[] = ["u.Role = 'teacher'"];
+    const conditions: string[] = ["u.DeletedAt IS NULL", hasRole("u", TEACHER_ROLE_CODES)];
 
     if (filter?.status) {
-      req.input("status", sql.VarChar(20), filter.status.toUpperCase());
-      conditions.push("UPPER(u.AccountStatus) = @status");
+      req.input("status", sql.VarChar(20), filter.status.toLowerCase());
+      conditions.push("LOWER(u.AccountStatus) = @status");
     }
     if (filter?.search && filter.search.trim() !== "") {
       req.input("search", sql.NVarChar(150), `%${filter.search.trim()}%`);
@@ -1396,26 +2404,36 @@ export class SqlServerAdminRepository implements AdminRepository {
       FullName: string;
       Email: string;
       MobileNumber: string;
-      Role: string;
       AccountStatus: string;
       CreatedAt: Date;
       Specialization: string | null;
       ExperienceYears: number | null;
       Qualification: string | null;
       Bio: string | null;
+      AssignedCourseIds: string | null;
+      AssignedBatchIds: string | null;
     }>(`
-      SELECT 
+      SELECT
         u.UserId,
         u.FullName,
         u.Email,
         u.MobileNumber,
-        u.Role,
         u.AccountStatus,
         u.CreatedAt,
         tp.Specialization,
         tp.ExperienceYears,
         tp.Qualification,
-        tp.Bio
+        tp.Bio,
+        (
+          SELECT STRING_AGG(CAST(a.CourseId AS VARCHAR(30)), ',')
+          FROM (SELECT DISTINCT ta.CourseId FROM dbo.NXA_TeacherAllocations ta
+                WHERE ta.TeacherUserId = u.UserId AND ta.IsActive = 1) a
+        ) AS AssignedCourseIds,
+        (
+          SELECT STRING_AGG(CAST(ta.BatchId AS VARCHAR(30)), ',')
+          FROM dbo.NXA_TeacherAllocations ta
+          WHERE ta.TeacherUserId = u.UserId AND ta.IsActive = 1 AND ta.BatchId IS NOT NULL
+        ) AS AssignedBatchIds
       FROM dbo.NXA_Users u
       LEFT JOIN dbo.NXA_TeacherProfiles tp ON tp.UserId = u.UserId
       WHERE ${conditions.join(" AND ")}
@@ -1428,15 +2446,17 @@ export class SqlServerAdminRepository implements AdminRepository {
       email: r.Email,
       mobile: r.MobileNumber,
       role: "teacher",
-      status: (r.AccountStatus.toLowerCase() as UserStatus) ?? "active",
+      status: toUserStatus(r.AccountStatus),
       createdAt: r.CreatedAt.toISOString(),
-      specialization: r.Specialization ?? "General",
+      specialization: r.Specialization ?? "",
       experienceYears: Number(r.ExperienceYears ?? 0),
       bio: r.Bio ?? "",
       qualifications: r.Qualification ?? "",
-      assignedCourseIds: [],
-      assignedBatchIds: [],
-      rating: 4.8,
+      // Derived from active allocations (approved decision), never stored.
+      assignedCourseIds: r.AssignedCourseIds ? r.AssignedCourseIds.split(",") : [],
+      assignedBatchIds: r.AssignedBatchIds ? r.AssignedBatchIds.split(",") : [],
+      // No rating source exists; 0 means "not rated", not a score.
+      rating: 0,
     }));
   }
 
@@ -1444,68 +2464,190 @@ export class SqlServerAdminRepository implements AdminRepository {
     name: string;
     email: string;
     mobile: string;
+    passwordHash: string;
+    assignedByUserId: EntityId;
     specialization?: string | undefined;
     experienceYears?: number | undefined;
     qualifications?: string | undefined;
     bio?: string | undefined;
-  }): Promise<Teacher> {
-    const pool = await this.getPool();
-    const tx = pool.transaction();
-    await tx.begin();
-
-    try {
-      const uReq = tx.request();
-      uReq.input("name", sql.NVarChar(150), input.name);
-      uReq.input("email", sql.NVarChar(255), input.email.toLowerCase());
-      uReq.input("mobile", sql.VarChar(20), input.mobile);
-      uReq.input("role", sql.VarChar(20), "teacher");
-      uReq.input("status", sql.VarChar(20), "ACTIVE");
-
-      const uRes = await uReq.query<{ UserId: number | bigint }>(`
-        INSERT INTO dbo.NXA_Users (FullName, Email, MobileNumber, Role, AccountStatus, CreatedAt, UpdatedAt)
-        OUTPUT inserted.UserId
-        VALUES (@name, @email, @mobile, @role, @status, SYSUTCDATETIME(), SYSUTCDATETIME())
-      `);
-
-      const userId = uRes.recordset[0]!.UserId;
-      const empCode = `TCH-${userId}`;
-
+  }, audit?: StaffAudit): Promise<Teacher> {
+    const userId = await this.insertStaffUser({ ...input, roleCode: "teacher" }, async (tx, newUserId) => {
       const tpReq = tx.request();
-      tpReq.input("userId", sql.BigInt, userId);
-      tpReq.input("empCode", sql.VarChar(40), empCode);
-      tpReq.input("spec", sql.NVarChar(200), input.specialization ?? "General");
+      tpReq.input("userId", sql.BigInt, newUserId);
+      tpReq.input("empCode", sql.VarChar(40), `TCH-${newUserId}`);
+      tpReq.input("spec", sql.NVarChar(200), input.specialization ?? null);
       tpReq.input("exp", sql.Decimal(4, 1), input.experienceYears ?? 0);
-      tpReq.input("qual", sql.NVarChar(200), input.qualifications ?? "");
-      tpReq.input("bio", sql.NVarChar(sql.MAX), input.bio ?? "");
-
+      tpReq.input("qual", sql.NVarChar(200), input.qualifications ?? null);
+      tpReq.input("bio", sql.NVarChar(sql.MAX), input.bio ?? null);
       await tpReq.query(`
         INSERT INTO dbo.NXA_TeacherProfiles (
           UserId, EmployeeCode, Specialization, ExperienceYears, Qualification, Bio, IsActive, CreatedAt
         )
         VALUES (@userId, @empCode, @spec, @exp, @qual, @bio, 1, SYSUTCDATETIME())
       `);
+      await writeStaffAudit(tx, audit, newUserId);
+    });
 
+    const [created] = (await this.findTeachers()).filter((t) => t.id === userId);
+    if (!created) throw new RecordNotFoundError("teacher", userId);
+    return created;
+  }
+
+  /** Runs `work` in one transaction; rolls back and rethrows on any error. */
+  private async inTeacherTransaction<T>(work: (tx: sql.Transaction) => Promise<T>): Promise<T> {
+    const pool = await this.getPool();
+    const tx = pool.transaction();
+    await tx.begin();
+    try {
+      const result = await work(tx);
       await tx.commit();
-
-      return {
-        id: String(userId),
-        name: input.name,
-        email: input.email.toLowerCase(),
-        mobile: input.mobile,
-        role: "teacher",
-        status: "active",
-        createdAt: new Date().toISOString(),
-        specialization: input.specialization ?? "General",
-        experienceYears: input.experienceYears ?? 0,
-        bio: input.bio ?? "",
-        qualifications: input.qualifications ?? "",
-        assignedCourseIds: [],
-        assignedBatchIds: [],
-        rating: 5.0,
-      };
+      return result;
     } catch (err) {
-      await tx.rollback();
+      try {
+        await tx.rollback();
+      } catch {
+        // the original error is the one worth reporting
+      }
       throw err;
     }
+  }
+
+  private async findTeacherById(id: EntityId): Promise<Teacher> {
+    const [teacher] = (await this.findTeachers()).filter((t) => t.id === String(id));
+    if (!teacher) throw new RecordNotFoundError("teacher", id);
+    return teacher;
+  }
+
+  /** Locks the teacher's user row; RecordNotFoundError when the user is not a live teacher. */
+  private async lockTeacher(
+    tx: sql.Transaction,
+    id: EntityId,
+  ): Promise<{ FullName: string; AccountStatus: string; Specialization: string | null; ExperienceYears: number | null; Qualification: string | null; Bio: string | null; HasProfile: number }> {
+    const r = await tx
+      .request()
+      .input("id", sql.BigInt, id)
+      .query(`
+        SELECT u.FullName, u.AccountStatus, tp.Specialization, tp.ExperienceYears, tp.Qualification, tp.Bio,
+               CASE WHEN tp.UserId IS NULL THEN 0 ELSE 1 END AS HasProfile
+        FROM dbo.NXA_Users u WITH (UPDLOCK, HOLDLOCK)
+        LEFT JOIN dbo.NXA_TeacherProfiles tp ON tp.UserId = u.UserId
+        WHERE u.UserId = @id AND u.DeletedAt IS NULL AND ${hasRole("u", TEACHER_ROLE_CODES)}
+      `);
+    const row = r.recordset[0];
+    if (!row) throw new RecordNotFoundError("teacher", id);
+    return row;
+  }
+
+  async updateTeacher(
+    id: EntityId,
+    changes: {
+      name?: string | undefined;
+      specialization?: string | null | undefined;
+      experienceYears?: number | undefined;
+      qualifications?: string | null | undefined;
+      bio?: string | null | undefined;
+    },
+    actorUserId: EntityId,
+  ): Promise<{ record: Teacher; changed: boolean }> {
+    requireNumericIds({ teacher: id });
+    const changed = await this.inTeacherTransaction(async (tx) => {
+      const cur = await this.lockTeacher(tx, id);
+      const before: Record<string, unknown> = {
+        name: cur.FullName,
+        specialization: cur.Specialization ?? null,
+        experienceYears: Number(cur.ExperienceYears ?? 0),
+        qualifications: cur.Qualification ?? null,
+        bio: cur.Bio ?? null,
+      };
+      const norm = (v: unknown) => (v === "" ? null : v);
+      const diff = (Object.keys(changes) as Array<keyof typeof changes>).filter(
+        (k) => changes[k] !== undefined && norm(changes[k]) !== before[k],
+      );
+      if (diff.length === 0) return false;
+
+      if (diff.includes("name")) {
+        await tx
+          .request()
+          .input("id", sql.BigInt, id)
+          .input("name", sql.NVarChar(150), changes.name)
+          .query(`UPDATE dbo.NXA_Users SET FullName = @name, UpdatedAt = SYSUTCDATETIME() WHERE UserId = @id`);
+      }
+      const profileKeys = diff.filter((k) => k !== "name");
+      if (profileKeys.length > 0) {
+        const next = {
+          spec: diff.includes("specialization") ? norm(changes.specialization) : cur.Specialization,
+          exp: diff.includes("experienceYears") ? changes.experienceYears : Number(cur.ExperienceYears ?? 0),
+          qual: diff.includes("qualifications") ? norm(changes.qualifications) : cur.Qualification,
+          bio: diff.includes("bio") ? norm(changes.bio) : cur.Bio,
+        };
+        const p = tx
+          .request()
+          .input("id", sql.BigInt, id)
+          .input("spec", sql.NVarChar(200), next.spec ?? null)
+          .input("exp", sql.Decimal(4, 1), next.exp ?? 0)
+          .input("qual", sql.NVarChar(200), next.qual ?? null)
+          .input("bio", sql.NVarChar(sql.MAX), next.bio ?? null);
+        if (cur.HasProfile) {
+          await p.query(`
+            UPDATE dbo.NXA_TeacherProfiles
+            SET Specialization = @spec, ExperienceYears = @exp, Qualification = @qual, Bio = @bio, UpdatedAt = SYSUTCDATETIME()
+            WHERE UserId = @id
+          `);
+        } else {
+          p.input("empCode", sql.VarChar(40), `TCH-${id}`);
+          p.input("active", sql.Bit, String(cur.AccountStatus ?? "").toLowerCase() === "active");
+          await p.query(`
+            INSERT INTO dbo.NXA_TeacherProfiles (UserId, EmployeeCode, Specialization, ExperienceYears, Qualification, Bio, IsActive, CreatedAt)
+            VALUES (@id, @empCode, @spec, @exp, @qual, @bio, @active, SYSUTCDATETIME())
+          `);
+        }
+      }
+      await writeAuditLog(tx.request(), {
+        actorUserId,
+        actionType: "UPDATE_TEACHER",
+        moduleCode: "TEACHER_MGMT",
+        entityName: "Teacher",
+        entityId: String(id),
+        oldValues: JSON.stringify(Object.fromEntries(diff.map((k) => [k, before[k]]))),
+        newValues: JSON.stringify(Object.fromEntries(diff.map((k) => [k, norm(changes[k])]))),
+      });
+      return true;
+    });
+    return { record: await this.findTeacherById(id), changed };
+  }
+
+  async setTeacherStatus(
+    id: EntityId,
+    status: "active" | "deactivated",
+    reason: string | undefined,
+    actorUserId: EntityId,
+  ): Promise<{ record: Teacher; changed: boolean }> {
+    requireNumericIds({ teacher: id });
+    const changed = await this.inTeacherTransaction(async (tx) => {
+      const cur = await this.lockTeacher(tx, id);
+      const previous = String(cur.AccountStatus ?? "").toLowerCase();
+      if (previous === status) return false;
+      await tx
+        .request()
+        .input("id", sql.BigInt, id)
+        .input("status", sql.VarChar(20), status)
+        .query(`UPDATE dbo.NXA_Users SET AccountStatus = @status, UpdatedAt = SYSUTCDATETIME() WHERE UserId = @id`);
+      await tx
+        .request()
+        .input("id", sql.BigInt, id)
+        .input("active", sql.Bit, status === "active")
+        .query(`UPDATE dbo.NXA_TeacherProfiles SET IsActive = @active, UpdatedAt = SYSUTCDATETIME() WHERE UserId = @id`);
+      await writeAuditLog(tx.request(), {
+        actorUserId,
+        actionType: status === "active" ? "ACTIVATE_TEACHER" : "DEACTIVATE_TEACHER",
+        moduleCode: "TEACHER_MGMT",
+        entityName: "Teacher",
+        entityId: String(id),
+        oldValues: JSON.stringify({ status: previous }),
+        newValues: JSON.stringify({ status, ...(reason ? { reason } : {}) }),
+      });
+      return true;
+    });
+    return { record: await this.findTeacherById(id), changed };
   }
 }

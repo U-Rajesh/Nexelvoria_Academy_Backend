@@ -48,6 +48,7 @@ const mapRowToCredential = (row: RawCredentialRow): CredentialRecord => {
     passwordHash: row.PasswordHash,
     passwordUpdatedAt: updated,
     failedLoginAttempts: row.FailedLoginAttempts ?? 0,
+    ...(row.IsLocked === null || row.IsLocked === undefined ? {} : { isLocked: Boolean(row.IsLocked) }),
     ...(row.LockoutUntil ? { lockedUntil: row.LockoutUntil.toISOString() } : {}),
     createdAt: row.CreatedAt.toISOString(),
     updatedAt: updated,
@@ -296,6 +297,7 @@ export class SqlServerCredentialRepository implements CredentialRepository {
       return toLockoutState(
         {
           failedLoginAttempts: row.FailedLoginAttempts,
+          ...(row.IsLocked === null || row.IsLocked === undefined ? {} : { isLocked: Boolean(row.IsLocked) }),
           ...(row.LockoutUntil ? { lockedUntil: row.LockoutUntil.toISOString() } : {}),
         },
         input.threshold,
@@ -336,7 +338,6 @@ export class SqlServerCredentialRepository implements CredentialRepository {
          WHERE (
            ${isNumeric ? "UserId = CAST(@idParam AS BIGINT)" : "CAST(PublicUserId AS NVARCHAR(100)) = @idParam"}
          )
-         AND FailedLoginAttempts < @threshold
          AND IsLocked = 0
          AND (LockoutUntil IS NULL OR LockoutUntil <= SYSUTCDATETIME())
          AND PasswordHash IN (${inClause})

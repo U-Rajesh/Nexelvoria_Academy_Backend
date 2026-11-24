@@ -316,7 +316,10 @@ describe("SqlServerTeacherRepository (unit with mock pool)", () => {
       EvaluatedAt: new Date("2026-11-22"),
     };
 
-    const pool = createMockPool(() => ({ recordset: [mockSubmission] }));
+    // Item 10B: evaluation checks allocation, marks range and the next version first (ASM-012).
+    const pool = createMockPool((q: string) =>
+      q.includes("AS Allowed") ? { recordset: [{ MaximumMarks: 50, NextVersion: 2, Allowed: 1 }] } : { recordset: [mockSubmission] },
+    );
     const repo = new SqlServerTeacherRepository(pool);
 
     const submission = await repo.submitAssignment({

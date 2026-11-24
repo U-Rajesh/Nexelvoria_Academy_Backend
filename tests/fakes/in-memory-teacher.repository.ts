@@ -296,7 +296,7 @@ export class InMemoryTeacherRepository implements TeacherRepository {
   async recordAttendanceSession(
     teacherId: EntityId,
     session: { batchId: string; courseId?: string; sessionTitle: string; startsAt?: string; endsAt?: string },
-    records: Array<{ studentUserId: string; status: "present" | "absent" | "late" | "excused"; remarks?: string }>,
+    records: Array<{ studentUserId: string; status: "present" | "absent" | "leave"; remarks?: string }>,
   ): Promise<ClassSessionRecord> {
     const sessionId = `session-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const createdSession: ClassSessionRecord = {

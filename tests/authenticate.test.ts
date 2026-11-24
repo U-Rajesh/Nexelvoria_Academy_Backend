@@ -84,7 +84,7 @@ describe("session-aware authentication", () => {
     const app = express();
     app.use(requestContext);
 
-    const authenticate = createAuthenticate({ sessions });
+    const authenticate = createAuthenticate({ sessions, studentAccess: null });
 
     app.get("/protected", authenticate, guard, (req, res) =>
       sendSuccess(res, { data: { principal: req.principal ?? null } }),

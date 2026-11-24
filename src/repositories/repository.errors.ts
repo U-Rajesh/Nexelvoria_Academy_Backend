@@ -59,6 +59,34 @@ export class DuplicateRecordError extends RepositoryError {
 }
 
 /**
+ * The write includes fields the store has no column for (a schema gap).
+ *
+ * Thrown instead of silently dropping the values, so a caller is never told a
+ * change was saved when it was not.
+ */
+export class UnsupportedFieldsError extends RepositoryError {
+  constructor(
+    readonly entity: string,
+    readonly fields: readonly string[],
+  ) {
+    super(`${entity} cannot store: ${fields.join(", ")}`);
+  }
+}
+
+/**
+ * A delete was refused because other records still reference the row
+ * (SQL Server error 547, FK violation) - e.g. a lesson with student progress.
+ */
+export class RecordInUseError extends RepositoryError {
+  constructor(
+    readonly entity: string,
+    readonly detail: string,
+  ) {
+    super(`${entity} is still referenced: ${detail}`);
+  }
+}
+
+/**
  * A write lost an optimistic-concurrency check.
  *
  * Reserved for the aggregates identified in open-questions Q24 (course

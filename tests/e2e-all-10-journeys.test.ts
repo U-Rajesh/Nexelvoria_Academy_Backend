@@ -7,6 +7,7 @@ import { startServer, type TestServer } from "./helpers/server";
 import { createTestHarness, type TestHarness } from "./fakes";
 import { issueAccessToken } from "../src/modules/auth/token.service";
 import { createAuthenticate } from "../src/middleware/authenticate.middleware";
+import { seedEnrollment, seedLessons } from "./helpers/learning-access";
 
 describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
   let harness: TestHarness;
@@ -142,6 +143,11 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
     });
 
     harness.teachers.seedBatchAllocation(teacherUserId, defaultBatchId, defaultCourseId);
+
+    // CRS-010 / BR-013: the student studies (and may use the placement portal)
+    // through an ACTIVE enrollment; "les-01" belongs to the course.
+    await seedLessons(harness, defaultCourseId, ["les-01"]);
+    await seedEnrollment(harness, studentUserId, defaultCourseId, { batchId: defaultBatchId });
     harness.teachers.seedBatchStudent(defaultBatchId, {
       studentId: studentUserId,
       studentName: student.name,
@@ -153,6 +159,7 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
     });
 
     const authenticate = createAuthenticate({
+      studentAccess: null,
       sessions: () => harness.sessions,
     });
 
@@ -217,20 +224,44 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
     const detailJson = (await detailRes.json()) as any;
     assert.equal(detailJson.data.slug, course.slug);
 
-    // 3. Create payment order for enrollment
+    // 3. Pay for the student's OWN enrollment awaiting payment (BR-002). A
+    //    second course, since the student already studies the default one.
+    const payCourse = await harness.courses.create({
+      slug: "journey-2-course",
+      title: "Journey 2 Course",
+      shortDescription: "x",
+      longDescription: "x",
+      durationWeeks: 4,
+      feeINR: 30000,
+      level: "Beginner",
+      prerequisites: [],
+      learningOutcomes: [],
+    });
+    const payEnrollment = await seedEnrollment(harness, studentUserId, payCourse.id, { status: "approved_unpaid" });
     const orderRes = await server.post(
       "/api/v1/payments/orders",
       {
-        courseId: course.id,
-        enrollmentId: "enr-journey-2",
+        courseId: payCourse.id,
+        enrollmentId: payEnrollment.id,
       },
       { headers: { Authorization: `Bearer ${studentToken}` } }
     );
-    assert.equal(orderRes.status, 201);
-    const orderJson = (await orderRes.json()) as any;
-    assert.ok(orderJson.data.order.id);
-    const orderId = orderJson.data.order.id;
-    const gatewayOrderId = orderJson.data.order.gatewayOrderId;
+    // No gateway integration yet: refused, never simulated.
+    assert.equal(orderRes.status, 503);
+    // A gateway order as the future Razorpay adapter would have created it.
+    const seededOrder = await harness.payments.createPaymentOrder({
+      studentUserId,
+      enrollmentId: payEnrollment.id,
+      gatewayName: "razorpay",
+      gatewayOrderId: "order_gw_e2e_002",
+      orderReference: "ORD-E2E-002",
+      amount: 30000,
+      currencyCode: "INR",
+      orderStatus: "created",
+      expiresAt: new Date(Date.now() + 3600000).toISOString(),
+    });
+    const orderId = seededOrder.id;
+    const gatewayOrderId = seededOrder.gatewayOrderId;
 
     // 4. Verify payment with HMAC SHA256 signature
     const paymentId = "pay_rzp_e2e_001";
@@ -253,6 +284,7 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
     const verifyJson = (await verifyRes.json()) as any;
     assert.equal(verifyJson.data.success, true);
     assert.ok(verifyJson.data.receipt.receiptNumber);
+    assert.equal((await harness.enrollments.findById(payEnrollment.id))?.status, "active", "BR-004 activation");
 
     // 5. Verify payment history reflects student receipt
     const myPaymentsRes = await server.get("/api/v1/payments/me", {
@@ -359,13 +391,11 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
 
   // JOURNEY 5
   it("Journey 5: Assessment Examination -> Progress -> Certificate Issuance & Verification", async () => {
-    // 1. Check certificate eligibility
+    // 1. Eligibility is blocked pending Q8 and verified data (BR-011 not invented).
     const eligRes = await server.get(`/api/v1/certificates/eligibility/${defaultCourseId}`, {
       headers: { Authorization: `Bearer ${studentToken}` },
     });
-    assert.equal(eligRes.status, 200);
-    const eligJson = (await eligRes.json()) as any;
-    assert.equal(eligJson.data.isEligible, true);
+    assert.equal(eligRes.status, 503);
 
     // 2. Admin issues certificate
     const issueRes = await server.post(
@@ -382,10 +412,24 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
       },
       { headers: { Authorization: `Bearer ${adminToken}` } }
     );
-    assert.equal(issueRes.status, 201);
-    const issueJson = (await issueRes.json()) as any;
-    const cert = issueJson.data;
-    assert.ok(cert.certificateNumber.startsWith("NXA-2026-"));
+    assert.equal(issueRes.status, 503, "issuing is blocked with eligibility");
+
+    // A certificate issued before the block still verifies publicly.
+    const cert = await harness.certificates.issueCertificate({
+      studentUserId,
+      studentNameAtIssue: "Aarav Sharma",
+      courseId: defaultCourseId,
+      courseNameAtIssue: "Full Stack Java Cloud Mastery",
+      enrollmentId: "enr-fsd-001",
+      certificateNumber: "NXA-2026-E2E005",
+      verificationToken: "token-e2e-005",
+      attendancePercentage: 90,
+      passingMarksVerified: true,
+      courseCompletionVerified: true,
+      certificateStatus: "valid",
+      issuedByUserId: "admin-1",
+      pdfUrl: "/api/v1/certificates/download/NXA-2026-E2E005",
+    });
 
     // 3. Public unauthenticated verification
     const verifyRes = await server.get(`/api/v1/certificates/public/verify/${cert.certificateNumber}`);
@@ -473,11 +517,12 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
 
   // JOURNEY 7
   it("Journey 7: Support Ticket Lifecycle -> Multi-party Replies -> Status Resolution -> In-App Notifications", async () => {
+    harness.support.categories.push({ id: "7", name: "Technical", isActive: true });
     // 1. Student raises support ticket
     const ticketRes = await server.post(
       "/api/v1/support/tickets",
       {
-        categoryId: "technical_issue",
+        categoryId: "7",
         subject: "IDE Virtual Machine Connection Timeout",
         description: "Unable to reach the remote workspace on port 8080.",
         priority: "high",
@@ -582,6 +627,9 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
       gender: "male",
       fullAddress: "Hyderabad",
     });
+    // BR-001: email and mobile are verified before an admin may approve.
+    await harness.students.markVerified(candidateUser.id, "email");
+    await harness.students.markVerified(candidateUser.id, "mobile");
 
     // 2. Admin views students list
     const studentsRes = await server.get("/api/v1/students", {
@@ -607,12 +655,16 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
     const batchesJson = (await batchesRes.json()) as any;
     assert.ok(batchesJson.data.length > 0);
     const batchId = batchesJson.data[0].id;
+    const batchCourseId = batchesJson.data[0].courseId;
 
+    // Approved decision: an allocation is the (course, batch, teacher) triple
+    // and the batch must belong to the course.
+    harness.admin.activeTeacherIds.add(teacherUserId);
     const allocRes = await server.post(
       `/api/v1/admin/batches/${batchId}/allocate`,
       {
         teacherUserId,
-        role: "primary",
+        courseId: batchCourseId,
       },
       { headers: { Authorization: `Bearer ${adminToken}` } }
     );
@@ -632,6 +684,7 @@ describe("Phase 2: Critical End-to-End User Journeys Audit", () => {
     assert.ok(statsJson.data);
     assert.ok(statsJson.data.totalActiveStudents !== undefined);
 
+    harness.support.settings.push({ id: "1", settingKey: "maintenance_mode", settingValue: "true", valueType: "boolean", isSecret: false, updatedAt: new Date().toISOString() });
     // 2. Super Admin updates system configuration
     const configRes = await server.put(
       "/api/v1/support/admin/system-config",

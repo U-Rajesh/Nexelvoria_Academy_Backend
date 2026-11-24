@@ -28,7 +28,11 @@ import type { EntityId, IsoDateTime } from "../../contracts/identifier.contract"
  * matches on `(userId, purpose)` - so an email-verification code cannot be
  * replayed against, say, a future password reset.
  */
-export const OTP_PURPOSES = ["email_verification"] as const;
+export const OTP_PURPOSES = [
+  "email_verification",
+  /** AUTH-006 forgot password: proves control of the account email before a reset. */
+  "password_reset",
+] as const;
 
 export type OtpPurpose = (typeof OTP_PURPOSES)[number];
 

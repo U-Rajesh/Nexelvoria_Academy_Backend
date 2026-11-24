@@ -137,7 +137,7 @@ describe("session management service", () => {
 
     app.get(
       "/protected",
-      createAuthenticate({ sessions: () => h.sessions }),
+      createAuthenticate({ sessions: () => h.sessions, studentAccess: null }),
       requireAuth,
       (_req, res) => sendSuccess(res, { message: "ok" }),
     );

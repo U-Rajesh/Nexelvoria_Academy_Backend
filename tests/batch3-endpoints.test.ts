@@ -6,6 +6,7 @@ import { issueAccessToken } from "../src/modules/auth/token.service";
 import { createAuthenticate } from "../src/middleware/authenticate.middleware";
 import { createTestHarness, type TestHarness } from "./fakes";
 import { json, startServer, type TestServer } from "./helpers/server";
+import { seedEnrollment, seedLessons } from "./helpers/learning-access";
 
 describe("Batch 3: Teacher & Learning Management Endpoints Integration", () => {
   let harness: TestHarness;
@@ -96,6 +97,11 @@ describe("Batch 3: Teacher & Learning Management Endpoints Integration", () => {
     });
 
     harness.teachers.seedBatchAllocation(teacherUserId, batchId, courseId);
+
+    // CRS-010: the student studies through an ACTIVE enrollment in this batch,
+    // and the lesson used below belongs to the course.
+    await seedLessons(harness, courseId, ["les-kafka-01"]);
+    await seedEnrollment(harness, studentUserId, courseId, { batchId });
     harness.teachers.seedBatchStudent(batchId, {
       studentId: studentUserId,
       studentName: studentUser.name,
@@ -107,6 +113,7 @@ describe("Batch 3: Teacher & Learning Management Endpoints Integration", () => {
     });
 
     const authenticate = createAuthenticate({
+      studentAccess: null,
       sessions: () => harness.sessions,
     });
 

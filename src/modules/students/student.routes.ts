@@ -1,8 +1,8 @@
 import { Router, type RequestHandler } from "express";
 
-import { requireAdmin, requireStudent } from "../../middleware/authorize.middleware";
+import { requireAdmin, requireStudent, requireStudentAllowingLimited } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
-import { createStudentController } from "./student.controller";
+import { createStudentController, type StudentAdminEffects } from "./student.controller";
 import { createStudentService, type StudentServiceDeps } from "./student.service";
 import {
   studentApproveBodySchema,
@@ -32,6 +32,8 @@ import {
  * `GET /:studentId`, or Express will treat "me" as a student id.
  */
 export interface StudentRoutesOptions extends StudentServiceDeps {
+  /** Audit + session revocation for admin decisions (wired by the registry). */
+  adminEffects?: StudentAdminEffects;
   /**
    * Authentication middleware, which populates `req.principal`.
    *
@@ -59,7 +61,7 @@ export interface StudentRoutesOptions extends StudentServiceDeps {
 }
 
 export const createStudentRoutes = (options: StudentRoutesOptions): Router => {
-  const controller = createStudentController(createStudentService(options));
+  const controller = createStudentController(createStudentService(options), options.adminEffects);
   const router = Router();
 
   /**
@@ -78,8 +80,15 @@ export const createStudentRoutes = (options: StudentRoutesOptions): Router => {
       ? [requireStudent]
       : [options.authenticate, requireStudent];
 
+  // CL-001 allowlist: also open to students whose approval is pending (limited access).
+  const limitedStudentGuards: RequestHandler[] =
+    options.authenticate === undefined
+      ? [requireStudentAllowingLimited]
+      : [options.authenticate, requireStudentAllowingLimited];
+
   // --- Student's own profile (Batch 2) - MUST be mounted before /:studentId ---
-  router.get("/me", ...studentGuards, controller.getMe);
+  // Viewing it (with approval status) is allowed at limited access; editing is not.
+  router.get("/me", ...limitedStudentGuards, controller.getMe);
   router.put(
     "/me",
     ...studentGuards,

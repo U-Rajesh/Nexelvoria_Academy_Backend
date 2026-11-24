@@ -34,8 +34,11 @@ class MockSqlRequest {
 const createMockPool = (
   handler: (query: string, inputs: Record<string, unknown>) => unknown,
 ): sql.ConnectionPool => {
+  // CMS writes run in a transaction (change + audit row together).
+  const request = () => new MockSqlRequest(handler);
   return {
-    request: () => new MockSqlRequest(handler),
+    request,
+    transaction: () => ({ begin: async () => {}, commit: async () => {}, rollback: async () => {}, request }),
   } as unknown as sql.ConnectionPool;
 };
 
@@ -55,7 +58,7 @@ describe("SqlServerCmsRepository (unit with mock pool)", () => {
           ],
         };
       }
-      if (query.includes("MERGE dbo.NXA_WebsiteContent")) {
+      if (query.includes("UPDATE dbo.NXA_WebsiteContent SET Body")) {
         savedBody = String(inputs.body);
         return { rowsAffected: [1] };
       }
@@ -70,12 +73,20 @@ describe("SqlServerCmsRepository (unit with mock pool)", () => {
     assert.equal(activeOnly.length, 1);
     assert.equal(activeOnly[0]?.id, "ban-1");
 
+    // An unchanged banner set writes nothing.
     await repo.saveBanners(all, "1");
-    assert.ok(savedBody.includes("Admission Open"));
+    assert.equal(savedBody, "");
+
+    await repo.saveBanners([{ ...all[0]!, text: "Admission Open 2026" }, all[1]!], "1");
+    assert.ok(savedBody.includes("Admission Open 2026"));
   });
 
   it("manages blog articles with publishing filter", async () => {
     const pool = createMockPool((query, inputs) => {
+      if (query.includes("SELECT TOP 1 1 AS x FROM dbo.NXA_BlogArticles")) return { recordset: [] };
+      if (query.includes("FROM dbo.NXA_BlogArticles") && inputs.id === "103") {
+        return { recordset: [{ BlogArticleId: 103, Title: "New AI Post", Slug: "new-ai-post", Summary: "AI summary", Body: "{}", IsPublished: 1, PublishedAt: new Date().toISOString(), CreatedAt: new Date().toISOString() }] };
+      }
       if (query.includes("FROM dbo.NXA_BlogArticles")) {
         if (inputs.slug) {
           return {
@@ -212,12 +223,12 @@ describe("SqlServerCmsRepository (unit with mock pool)", () => {
   });
 
   it("manages college partnerships and institutional MOUs", async () => {
-    const pool = createMockPool((query, _inputs) => {
+    const pool = createMockPool((query, inputs) => {
       if (query.includes("SELECT CollegePartnerId")) {
         return {
           recordset: [
             {
-              CollegePartnerId: 501,
+              CollegePartnerId: inputs.id ?? 501,
               CollegeName: "VNR Vignana Jyothi Institute of Engineering",
               PartnershipType: "Full Placement MOU",
               Address: "Hyderabad",

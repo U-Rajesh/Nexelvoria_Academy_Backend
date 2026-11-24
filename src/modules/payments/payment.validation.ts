@@ -19,21 +19,49 @@ export const validateCouponSchema = z.object({
   grossAmountINR: z.number().nonnegative().optional(),
 });
 
+/** NXA_ManualPaymentRecords: ReferenceNumber varchar(100), ProofObjectKey nvarchar(700), Amount decimal(12,2). */
 export const manualPaymentSchema = z.object({
-  studentUserId: z.string().min(1, "Student User ID is required"),
-  enrollmentId: z.string().min(1, "Enrollment ID is required"),
-  amount: z.number().positive("Amount must be positive"),
+  // Non-numeric ids are answered 404 by the repository (BIGINT keys).
+  studentUserId: z.string().trim().min(1, "Student User ID is required"),
+  enrollmentId: z.string().trim().min(1, "Enrollment ID is required"),
+  amount: z
+    .number()
+    .positive("Amount must be positive")
+    .max(9999999999.99)
+    .refine((v) => Math.abs(Math.round(v * 100) - v * 100) < 1e-6, "Amount may have at most 2 decimals"),
   paymentMode: z.enum(["cash", "bank_transfer", "cheque", "pos_card", "other"]),
-  referenceNumber: z.string().min(2, "Reference number is required"),
-  proofObjectKey: z.string().optional(),
+  referenceNumber: z
+    .string()
+    .trim()
+    .min(2, "Reference number is required")
+    .max(100, "Reference number must be at most 100 characters"),
+  proofObjectKey: z.string().trim().max(700).optional(),
 });
 
-export const createDiscountSchema = z.object({
-  code: z.string().min(3, "Coupon code must be at least 3 characters"),
-  description: z.string().min(3, "Description is required"),
-  discountType: z.enum(["percentage", "fixed_amount"]),
-  value: z.number().positive("Discount value must be positive"),
-  applicableCourseIds: z.array(z.string()).default([]),
-  isActive: z.boolean().default(true),
-  validUntil: z.string().optional(),
-});
+export const createDiscountSchema = z
+  .object({
+    // NXA_Coupons.CouponCode is varchar(40); NXA_Discounts.DiscountName is nvarchar(150).
+    code: z
+      .string()
+      .trim()
+      .min(3, "Coupon code must be at least 3 characters")
+      .max(40, "Coupon code must be at most 40 characters")
+      .regex(/^[A-Za-z0-9_-]+$/, "Coupon code may contain only letters, digits, - and _"),
+    description: z.string().trim().min(3, "Description is required").max(150),
+    discountType: z.enum(["percentage", "fixed_amount"]),
+    value: z.number().positive("Discount value must be positive"),
+    // No coupon-course table exists, so a course restriction cannot be stored.
+    applicableCourseIds: z
+      .array(z.string())
+      .max(0, "Course-restricted coupons cannot be stored: the database has no coupon-course mapping")
+      .default([]),
+    isActive: z.boolean().default(true),
+    validUntil: z.string().optional(),
+    // NULL (omitted) means no limit.
+    usageLimit: z.number().int().positive().optional(),
+    perUserLimit: z.number().int().positive().optional(),
+  })
+  .refine((v) => v.discountType !== "percentage" || v.value <= 100, {
+    message: "A percentage discount cannot exceed 100",
+    path: ["value"],
+  });

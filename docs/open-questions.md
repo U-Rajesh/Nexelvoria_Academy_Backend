@@ -3,7 +3,7 @@
 **Audience:** the backend lead (decision owner), the two backend developers,
 and — for the database and frontend items — those teams.
 **Status:** raised at Step 3. None of these is decided.
-**Last updated:** 2026-11-17
+**Last updated:** 2026-11-24
 
 Each question states what is actually unresolved, what it blocks, the options,
 and a recommendation. **A recommendation is not a decision** — nothing here has
@@ -16,7 +16,7 @@ specific module. **P2** should be settled before launch.
 | --- | --- | --- | --- |
 | Q1 | Identifier type in MS SQL Server | P0 | DB team + lead |
 | Q2 | Business code generation | P1 | lead + business |
-| Q3 | **Dual OTP (BR-001) vs SMS disabled (BR-014)** | **P0** | lead + business |
+| Q3 | **Dual OTP (BR-001) vs SMS disabled (BR-014)** — resolved, formalised as [CL-001](requirement-clarifications.md#cl-001--mobile-otp-verification-deferred-at-launch) | **P0** | lead + business |
 | Q4 | Eight business rules referenced but undefined | P0 | business / SRS owner |
 | Q4a | **Lockout policy: permanent or timed** | P1 | lead + business |
 | Q5 | Batch capacity limit | P1 | administration |
@@ -44,6 +44,18 @@ specific module. **P2** should be settled before launch.
 
 ## Q3 — Dual OTP versus disabled SMS **(the central conflict)**
 
+> **UPDATE — FORMALISED AS CL-001 (business owner).** The email-only decision
+> below is retained and is now a formal clarification/deviation against BR-001,
+> AUTH-003 and acceptance criterion 1:
+> [requirement-clarifications.md, CL-001](requirement-clarifications.md#cl-001--mobile-otp-verification-deferred-at-launch).
+> Mobile OTP is **deferred at launch**; BR-014 is unchanged; email OTP is
+> mandatory for every student, including Admin-created students; mobile numbers
+> are stored and never marked verified without verification; approval follows
+> email verification and precedes payment; verified but unapproved students get
+> limited account access (pending implementation, see CL-001 "Open item").
+> A brief interim rule that also required mobile verification before approval
+> is withdrawn by CL-001.
+>
 > **RESOLVED — EMAIL ONLY (confirmed by the backend lead, 2026-11-18).**
 >
 > The contradiction below is real and was escalated rather than guessed at.
@@ -283,6 +295,12 @@ device/IP/location capture needs a geo-IP provider.
 
 ## Q4a — Lockout policy: permanent or timed? (P1, raised to blocking at Step 6G)
 
+> **ANSWERED (Group C decision D7, approved rule; see
+> [requirement-clarifications.md](requirement-clarifications.md)).** Option A:
+> a lockout remains until a password reset or Admin unlock. The Super Admin
+> may configure the failed-attempt threshold between 3 and 10; changes are
+> audited.
+
 **This is the final form of O4**, and it now blocks the login service.
 
 The credential repository (Step 6G) implements **counter-based permanent
@@ -323,6 +341,12 @@ under option A it is permanently NULL.
 ---
 
 ## Q5 — Batch capacity (P1)
+
+> **ANSWERED (Group C decision D6, approved rule).** The existing batch capacity
+> is a hard self-enrollment limit (conflict response when full); an Admin
+> override requires an audited reason; no waitlist. No capacity values are
+> invented. The global-default part of the recommendation below was not
+> approved.
 
 `Batch.maxCapacity` is optional, `SystemConfig.academic.maxBatchCapacity` is
 global, and the SRS says
@@ -367,6 +391,12 @@ on it beyond returning the boolean.
 ---
 
 ## Q8 — Three sources of truth for pass marks (P1)
+
+> **ANSWERED (Group C decision D1, approved rule).** The BR-011 thresholds (75%
+> attendance, 60% examination score) are minimum floors; settings or
+> course-specific overrides may raise them but never lower them; a test's own
+> pass percentage governs that test. The attendance formula is decision D2
+> (Present ÷ marked sessions held; Leave counts as not attended).
 
 Three places define passing criteria, and they can disagree:
 
@@ -421,6 +451,11 @@ the `payments` module can be built.
 ---
 
 ## Q14 — 2FA methods when SMS is disabled (P1)
+
+> **ANSWERED IN PART (Group C decision D11, approved rule).** Mandatory email
+> OTP as the second factor for Admin and Super Admin, reusing the OTP service.
+> TOTP, backup codes and student 2FA are not decided and are not part of this
+> decision.
 
 `TwoFactorSettings.method` allows `authenticator | sms | email`, and
 `SystemConfig.security.enforceTwoFactor` exists. But BR-014 disables SMS, so
@@ -549,6 +584,19 @@ large piece of infrastructure, not a feature.
 
 ## Q20 — CMS defaults, trainer ownership, question bank (P2)
 
+> **PARTLY ANSWERED (Batch 3 item 7, approved CMS rules).** New testimonials,
+> achievements and FAQs start hidden; testimonials are ordered by position then
+> name, FAQs by position, category then question (NXA_Faqs has no category
+> column, so position then question is applied), achievements newest date first.
+> Public trainer profiles stay separate from teacher accounts (point 2). Blog
+> posts are Admin-managed. "Reset" now saves the built-in default page text
+> through the server like any other audited save; it no longer re-seeds sample
+> hiring partners, college partners or corporate services. Point 1 (whether a
+> default should instead be the last published version), point 3 and point 4
+> remain open. Permission names quoted with the rules (`website.manage`,
+> `courses.manage`, `teachers.allocate`) do not exist yet (BR-018); the CMS
+> endpoints are guarded by the Admin / Super Admin role until the catalog exists.
+
 1. **Ten `reset*` methods** restore config to "default". Is a default a
    hardcoded seed shipped with the code, or the last published version? Affects
    whether defaults live in code or in the database.
@@ -565,6 +613,14 @@ large piece of infrastructure, not a feature.
 ---
 
 ## Q21 — Soft delete versus hard delete (P1)
+
+> **ANSWERED FOR CMS CONTENT (Batch 3 item 7, approved rule).** Website CMS
+> deletes (articles, FAQs, testimonials, achievements, public trainer profiles,
+> careers, banners, college partners, corporate services, hiring partners that
+> nothing references) are permanent and audited (WEBSITE_CMS / CMS_DELETE);
+> hiding or deactivating is the reversible alternative. A hiring partner still
+> referenced by jobs or placement records cannot be deleted (409). The question
+> remains open for the non-CMS deletes listed below.
 
 Several `delete*` methods exist: `deleteDiscount`, `deleteStudyMaterial`,
 `deleteRecordedClass`, `deleteArticle`, `deleteFAQ`, `deleteTestimonial`,

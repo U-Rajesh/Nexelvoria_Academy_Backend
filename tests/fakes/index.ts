@@ -14,6 +14,11 @@ import { InMemoryPaymentRepository } from "./in-memory-payment.repository";
 import { InMemoryCertificateRepository } from "./in-memory-certificate.repository";
 import { InMemoryPlacementRepository } from "./in-memory-placement.repository";
 import { InMemorySupportRepository } from "./in-memory-support.repository";
+import { InMemoryAcademicsRepository } from "./in-memory-academics.repository";
+import { InMemoryFinanceRepository } from "./in-memory-finance.repository";
+import { InMemoryReportsRepository } from "./in-memory-reports.repository";
+import { InMemoryAccountSecurityRepository } from "./in-memory-account-security.repository";
+import type { StudentProfileInput } from "../../src/modules/students/student.types";
 
 /**
  * TEST-ONLY wiring: a container backed entirely by in-memory fakes.
@@ -35,6 +40,10 @@ export interface TestHarness {
   certificates: InMemoryCertificateRepository;
   placements: InMemoryPlacementRepository;
   support: InMemorySupportRepository;
+  academics: InMemoryAcademicsRepository;
+  finance: InMemoryFinanceRepository;
+  reports: InMemoryReportsRepository;
+  accountSecurity: InMemoryAccountSecurityRepository;
   /** Clears every fake. Isolation between tests in one file. */
   reset: () => void;
 }
@@ -50,11 +59,38 @@ export const createTestHarness = (): TestHarness => {
   const teachers = new InMemoryTeacherRepository();
   const courses = new InMemoryCourseRepository();
   const admin = new InMemoryAdminRepository();
+  // Course and student management audits land in the same audit log
+  // (NXA_AuditLogs), written by those repositories with the change.
+  courses.auditSink = (entry) => admin.createAuditLog(entry);
+  // D6 / D4: batch capacity and prerequisites as the SQL adapters read them.
+  enrollments.batchCapacity = (batchId) => admin.batches.find((b) => b.id === batchId)?.capacity ?? null;
+  admin.prerequisitesOf = (courseId) => courses.findPrerequisites(courseId).catch(() => []);
+  students.auditSink = (entry) => admin.createAuditLog(entry);
   const cms = new InMemoryCmsRepository();
   const payments = new InMemoryPaymentRepository();
   const certificates = new InMemoryCertificateRepository();
   const placements = new InMemoryPlacementRepository();
   const support = new InMemorySupportRepository();
+  const academics = new InMemoryAcademicsRepository();
+  const finance = new InMemoryFinanceRepository();
+  const reports = new InMemoryReportsRepository();
+  const accountSecurity = new InMemoryAccountSecurityRepository();
+
+  // Admin-created students land in the same user/student fakes that OTP
+  // verification and approval read, as they share tables in SQL Server.
+  admin.studentAccountSink = async (input) => {
+    const user = await users.create({
+      name: input.name,
+      email: input.email,
+      mobile: input.mobile,
+      role: "student",
+      status: "pending",
+    });
+    await students.createForUser(user.id, {
+      collegeName: input.collegeName ?? "",
+    } as unknown as StudentProfileInput);
+    return user.id;
+  };
 
   const container = createContainer({
     credentials: () => credentials,
@@ -72,6 +108,10 @@ export const createTestHarness = (): TestHarness => {
     certificates: () => certificates,
     placements: () => placements,
     support: () => support,
+    academics: () => academics,
+    finance: () => finance,
+    reports: () => reports,
+    accountSecurity: () => accountSecurity,
   });
 
   return {
@@ -91,6 +131,10 @@ export const createTestHarness = (): TestHarness => {
     certificates,
     placements,
     support,
+    academics,
+    finance,
+    reports,
+    accountSecurity,
     reset: () => {
       credentials.reset();
       sessions.reset();
@@ -107,6 +151,7 @@ export const createTestHarness = (): TestHarness => {
       admin.auditLogs = [];
       admin.refunds = [];
       admin.financialOverrides = [];
+      admin.history.reset();
       admin.batchStudentsMap.clear();
       admin.teacherAllocationsMap.clear();
       cms.banners = [];
@@ -126,6 +171,10 @@ export const createTestHarness = (): TestHarness => {
       certificates.reset();
       placements.reset();
       support.reset();
+      academics.reset();
+      finance.reset();
+      reports.reset();
+      accountSecurity.reset();
     },
   };
 };
@@ -145,3 +194,6 @@ export { InMemoryPaymentRepository } from "./in-memory-payment.repository";
 export { InMemoryCertificateRepository } from "./in-memory-certificate.repository";
 export { InMemoryPlacementRepository } from "./in-memory-placement.repository";
 export { InMemorySupportRepository } from "./in-memory-support.repository";
+export { InMemoryAcademicsRepository } from "./in-memory-academics.repository";
+export { InMemoryFinanceRepository } from "./in-memory-finance.repository";
+export { InMemoryAccountSecurityRepository } from "./in-memory-account-security.repository";

@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 import type { RequestHandler } from "express";
 
 import { createAuthenticate } from "../src/middleware/authenticate.middleware";
+import { createStudentAccessResolver } from "../src/modules/students/student-access";
 import type { AppContainer } from "../src/container/container";
 import {
   createLoginService,
@@ -166,7 +167,11 @@ export const createDevLoginService = (
 export const createDevAuthenticate = (
   container: AppContainer = createDevContainer(),
 ): RequestHandler =>
-  createAuthenticate({ sessions: () => container.repositories.sessions });
+  createAuthenticate({
+    sessions: () => container.repositories.sessions,
+    // Same CL-001 student access tiers as production.
+    studentAccess: createStudentAccessResolver(() => container.repositories.students),
+  });
 
 /**
  * Sign-in addresses for the development accounts.

@@ -79,21 +79,56 @@ const resolveActor = (req: Request): Actor | undefined => {
 };
 
 /**
- * Requires an authenticated caller, without checking the role.
+ * CL-001: a student whose Admin approval is still pending has LIMITED access.
+ * Every guard refuses such a student unless the route explicitly opts in, so
+ * a new or forgotten endpoint fails closed.
  */
-export const requireAuth: RequestHandler = (req: Request, _res: Response, next: NextFunction) => {
-  if (resolveActor(req) === undefined) {
-    next(
-      ApiError.unauthorized(
-        "Authentication required",
-        "UNAUTHENTICATED",
-      ),
-    );
-    return;
-  }
-
-  next();
+const limitedStudentRefusal = (req: Request): ApiError | null => {
+  if (req.principal?.role !== "student" || req.principal.studentAccess !== "limited") return null;
+  logger.warn("authorization denied: student approval pending", {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.path,
+    userId: req.principal.id,
+  });
+  return ApiError.forbidden(
+    "Your registration is awaiting Admin approval. This feature becomes available once you are approved.",
+    "STUDENT_APPROVAL_PENDING",
+  );
 };
+
+export interface RoleGuardOptions {
+  /**
+   * Opt in to students with LIMITED access (approval pending). Only for the
+   * endpoints approved in CL-001: own profile and approval status, own
+   * enrollment list, own payment history, own notifications, own tickets.
+   */
+  allowLimitedStudent?: boolean;
+}
+
+const createRequireAuth =
+  (options: RoleGuardOptions = {}): RequestHandler =>
+  (req: Request, _res: Response, next: NextFunction) => {
+    if (resolveActor(req) === undefined) {
+      next(ApiError.unauthorized("Authentication required", "UNAUTHENTICATED"));
+      return;
+    }
+    const limited = options.allowLimitedStudent ? null : limitedStudentRefusal(req);
+    if (limited) {
+      next(limited);
+      return;
+    }
+    next();
+  };
+
+/**
+ * Requires an authenticated caller, without checking the role. Students with
+ * limited access (CL-001) are refused.
+ */
+export const requireAuth: RequestHandler = createRequireAuth();
+
+/** `requireAuth` that also admits students with limited access (CL-001 allowlist only). */
+export const requireAuthAllowingLimitedStudent: RequestHandler = createRequireAuth({ allowLimitedStudent: true });
 
 /**
  * Requires the caller to hold one of `allowed`.
@@ -102,7 +137,7 @@ export const requireAuth: RequestHandler = (req: Request, _res: Response, next: 
  * frontend's route guards do it: pass `ADMIN_ROLES` and both `admin` and
  * `super_admin` are accepted.
  */
-export const requireRoles = (allowed: readonly UserRole[]): RequestHandler => {
+export const requireRoles = (allowed: readonly UserRole[], options: RoleGuardOptions = {}): RequestHandler => {
   if (allowed.length === 0) {
     // A guard that allows nothing is always a programming mistake, and it
     // would silently 403 every request. Fail at startup instead.
@@ -138,6 +173,12 @@ export const requireRoles = (allowed: readonly UserRole[]): RequestHandler => {
       return;
     }
 
+    const limited = options.allowLimitedStudent ? null : limitedStudentRefusal(req);
+    if (limited) {
+      next(limited);
+      return;
+    }
+
     next();
   };
 };
@@ -157,6 +198,9 @@ export const requireAuthenticated = requireRoles(AUTHENTICATED_ROLES);
 
 /** Students only. An admin is NOT a student and is denied. */
 export const requireStudent = requireRoles(["student"]);
+
+/** Students including those with limited access - CL-001 allowlisted endpoints only. */
+export const requireStudentAllowingLimited = requireRoles(["student"], { allowLimitedStudent: true });
 
 /** Teachers only. */
 export const requireTeacher = requireRoles(["teacher"]);

@@ -3,8 +3,9 @@ import type { EntityId } from "../../contracts/identifier.contract";
 import { resolveSortField } from "../../middleware/validate.middleware";
 import { RecordNotFoundError } from "../../repositories/repository.errors";
 import { ApiError } from "../../utils/api-error";
+import { HttpStatus } from "../../utils/http-status";
 import { deriveAccountState } from "./account-state";
-import type { StudentRepository } from "./student.repository";
+import type { StudentAudit, StudentRepository } from "./student.repository";
 import {
   DEFAULT_STUDENT_SORT,
   STUDENT_SORT_FIELDS,
@@ -160,6 +161,7 @@ const recordDecision = async (
   status: Extract<AdminApprovalStatus, "approved" | "rejected">,
   decidedByUserId: EntityId,
   remarks?: string,
+  audit?: StudentAudit,
 ): Promise<Student> => {
   const existing = await deps.students.findById(id);
 
@@ -175,6 +177,18 @@ const recordDecision = async (
     );
   }
 
+  // BR-001 before BR-002: a student can be APPROVED only after the email OTP
+  // is verified. Mobile OTP is deferred at launch (BR-001 clarification
+  // CL-001, docs/open-questions.md Q3; BR-014 unchanged), so mobile
+  // verification is not required. Rejection is not gated.
+  if (status === "approved" && !existing.isEmailVerified) {
+    throw new ApiError(
+      HttpStatus.UNPROCESSABLE_ENTITY,
+      "The student's email address is not verified yet. Approval requires email verification.",
+      "EMAIL_NOT_VERIFIED",
+    );
+  }
+
   try {
     return toStudentResponse(
       await deps.students.recordApprovalDecision(id, {
@@ -182,7 +196,7 @@ const recordDecision = async (
         decidedByUserId,
         decidedAt: new Date().toISOString(),
         ...(remarks === undefined || remarks === "" ? {} : { remarks }),
-      }),
+      }, audit),
     );
   } catch (err) {
     // Lost the race described above, or the row vanished between the two
@@ -256,9 +270,35 @@ export const createStudentService = (deps: StudentServiceDeps) => ({
    * service, api-contracts section 15). Whether a suspended/deactivated
    * student can log in is enforced by AUTHENTICATION (Developer 1), not here.
    */
-  async setStudentStatus(id: EntityId, status: AdminSettableStudentStatus): Promise<Student> {
+  async setStudentStatus(id: EntityId, status: AdminSettableStudentStatus, audit?: StudentAudit): Promise<Student> {
+    // Approved rule (Milestone 4 review, as clarified by CL-001): only an
+    // approved student with a verified email can be activated, so activation
+    // never bypasses BR-001 / BR-002 - including for an account an admin has
+    // just created. Mobile OTP is deferred at launch. Suspension and
+    // deactivation stay available for every student.
+    if (status === "active") {
+      const existing = await deps.students.findById(id);
+      if (existing === null) {
+        throw ApiError.notFound("Student not found");
+      }
+      if (existing.adminApprovalStatus !== "approved") {
+        throw new ApiError(
+          HttpStatus.UNPROCESSABLE_ENTITY,
+          "Only an approved student can be activated.",
+          "STUDENT_NOT_APPROVED",
+        );
+      }
+      if (!existing.isEmailVerified) {
+        throw new ApiError(
+          HttpStatus.UNPROCESSABLE_ENTITY,
+          "A student must have a verified email address before activation.",
+          "STUDENT_NOT_VERIFIED",
+        );
+      }
+    }
+
     try {
-      return toStudentResponse(await deps.students.setStatus(id, status));
+      return toStudentResponse(await deps.students.setStatus(id, status, audit));
     } catch (err) {
       if (err instanceof RecordNotFoundError) {
         throw ApiError.notFound("Student not found");
@@ -285,17 +325,17 @@ export const createStudentService = (deps: StudentServiceDeps) => ({
    * here would skip a step nobody has approved. It also writes no
    * `accountState` - that value is derived (see account-state.ts).
    *
-   * Approval is NOT blocked on email verification. No confirmed rule
-   * requires it, so none is invented; an approved-but-unverified student
-   * still derives `pending_verification`, so the missing step stays visible
-   * rather than being papered over.
+   * Approval IS blocked until the email is verified (BR-001 as clarified by
+   * CL-001): 422 EMAIL_NOT_VERIFIED. Mobile OTP is deferred at launch, so the
+   * mobile number stays recorded as unverified. Rejection is not gated.
    */
   async approveStudent(
     id: EntityId,
     decidedByUserId: EntityId,
     remarks?: string,
+    audit?: StudentAudit,
   ): Promise<Student> {
-    return recordDecision(deps, id, "approved", decidedByUserId, remarks);
+    return recordDecision(deps, id, "approved", decidedByUserId, remarks, audit);
   },
 
   /**
@@ -308,8 +348,9 @@ export const createStudentService = (deps: StudentServiceDeps) => ({
     id: EntityId,
     decidedByUserId: EntityId,
     remarks: string,
+    audit?: StudentAudit,
   ): Promise<Student> {
-    return recordDecision(deps, id, "rejected", decidedByUserId, remarks);
+    return recordDecision(deps, id, "rejected", decidedByUserId, remarks, audit);
   },
 
   /** `PUT /students/me` - student updates their own profile */

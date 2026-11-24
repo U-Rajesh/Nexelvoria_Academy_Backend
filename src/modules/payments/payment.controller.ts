@@ -103,7 +103,8 @@ export class PaymentController {
   getReceipt = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const receiptId = String(req.params["receiptId"]);
-      const receipt = await this.paymentService.getReceiptById(receiptId);
+      // Students may read only receipts for their own payments.
+      const receipt = await this.paymentService.getReceiptForStudent(receiptId, getActorId(req));
       if (!receipt) {
         throw ApiError.notFound("Receipt not found.");
       }
@@ -159,7 +160,9 @@ export class PaymentController {
         grossAmountINR: req.query["grossAmountINR"] ? Number(req.query["grossAmountINR"]) : undefined,
       });
 
-      const discount = await this.paymentService.validateCoupon(parsed);
+      // A student's own per-user limit applies; staff previewing a code are not limited.
+      const studentUserId = req.principal?.role === "student" ? String(req.principal.id) : undefined;
+      const discount = await this.paymentService.validateCoupon({ ...parsed, studentUserId });
       sendSuccess(res, { data: discount });
     } catch (err) {
       next(err);
@@ -169,15 +172,20 @@ export class PaymentController {
   createDiscount = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const parsed = createDiscountSchema.parse(req.body);
-      const discount = await this.paymentService.createDiscount({
-        code: parsed.code,
-        description: parsed.description,
-        discountType: parsed.discountType,
-        value: parsed.value,
-        applicableCourseIds: parsed.applicableCourseIds,
-        isActive: parsed.isActive,
-        validUntil: parsed.validUntil,
-      });
+      const discount = await this.paymentService.createDiscount(
+        {
+          code: parsed.code,
+          description: parsed.description,
+          discountType: parsed.discountType,
+          value: parsed.value,
+          applicableCourseIds: parsed.applicableCourseIds,
+          isActive: parsed.isActive,
+          validUntil: parsed.validUntil,
+          usageLimit: parsed.usageLimit ?? null,
+          perUserLimit: parsed.perUserLimit ?? null,
+        },
+        getActorId(req),
+      );
 
       sendSuccess(res, {
         status: HttpStatus.CREATED,

@@ -65,6 +65,7 @@ describe("Batch 2 Endpoints Integration", () => {
     });
 
     const authenticate = createAuthenticate({
+      studentAccess: null,
       sessions: () => harness.sessions,
     });
 

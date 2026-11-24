@@ -101,6 +101,18 @@ describe("authorization matrix (real tokens, real endpoints)", () => {
       passwordHash: await hashPassword(PASSWORD),
     });
 
+    if (role === "student") {
+      // A student signs in once their email is verified (CL-001); approved
+      // here so the matrix exercises full student access.
+      await h.students.createForUser(user.id, PROFILE);
+      await h.students.markVerified(user.id, "email");
+      await h.students.recordApprovalDecision(user.id, {
+        status: "approved",
+        decidedByUserId: "admin-1",
+        decidedAt: new Date().toISOString(),
+      });
+    }
+
     const res = await server.post("/api/v1/auth/login", {
       identifier: email,
       password: PASSWORD,
@@ -153,6 +165,7 @@ describe("authorization matrix (real tokens, real endpoints)", () => {
         container: h.container,
         extraV1Routes,
         authenticate: createAuthenticate({
+          studentAccess: null,
           sessions: () => h.container.repositories.sessions,
         }),
       }),
@@ -176,6 +189,9 @@ describe("authorization matrix (real tokens, real endpoints)", () => {
       status: "pending",
     });
     await h.students.createForUser(candidate.id, PROFILE);
+    // Approval requires verified email and mobile (BR-001).
+    await h.students.markVerified(candidate.id, "email");
+    await h.students.markVerified(candidate.id, "mobile");
     candidateId = candidate.id;
   });
 

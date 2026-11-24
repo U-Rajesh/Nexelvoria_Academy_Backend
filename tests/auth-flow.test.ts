@@ -368,27 +368,18 @@ describe("auth flow: registration -> email verification -> student login", () =>
     assert.notEqual(res.status, 200, "a consumed challenge must not verify again");
   });
 
-  it("step 5 - login AFTER verification is refused with ACCOUNT_PENDING_APPROVAL", async () => {
-    // THE CONTRACTED END OF THE JOURNEY. api-contracts section 4:
-    // "403: ACCOUNT_PENDING_APPROVAL - email verified, awaiting BR-002".
+  it("step 5 - login AFTER verification succeeds with limited access (CL-001 decision 1)", async () => {
+    // Formerly refused with ACCOUNT_PENDING_APPROVAL. CL-001: a student with a
+    // verified email may sign in while approval is pending; authorization then
+    // restricts them to the allowlisted endpoints (covered in student-access tests).
     const res = await login("ananya@test.local");
 
-    assert.equal(res.status, 403);
-
+    assert.equal(res.status, 200);
     const body = await json(res);
-    assert.equal(body["success"], false);
-    assert.equal(body["error"], "ACCOUNT_PENDING_APPROVAL");
-
-    // This refusal carries NO ticket: the email is already verified, so
-    // there is nothing for the student to resolve themselves.
-    assert.equal(body["verificationTicket"], undefined);
-    assert.equal(body["data"], undefined);
+    assert.equal(body["success"], true);
   });
 
-  it("step 6 - activation (standing in for the out-of-scope admin action)", async () => {
-    // Guarded by its own precondition: the pending-approval state asserted
-    // in step 5 must hold BEFORE anything is activated, so this shortcut can
-    // never mask a step the journey skipped.
+  it("step 6 - Admin approval (standing in for the admin action; no separate activation)", async () => {
     const before_ = await h.users.findById(tempStudentId);
     assert.ok(before_);
     assert.equal(before_.status, "pending", "precondition: still pending");
@@ -398,13 +389,15 @@ describe("auth flow: registration -> email verification -> student login", () =>
     assert.equal(student.isEmailVerified, true, "precondition: email verified");
     assert.equal(student.adminApprovalStatus, "pending", "precondition: approval still pending");
 
-    // Repository-level, NOT through an endpoint: the admin status route is
-    // out of scope here, and no approval is recorded because none is needed
-    // to reach `active`. No rule is changed - `REQUIRED_STATUS` is still
-    // `active` and nothing in the application performs this transition yet.
-    const activated = await h.users.setStatus(tempStudentId, "active");
+    // CL-001 decision 2: approval alone gives full access; the account is
+    // never separately activated.
+    const approved = await h.students.recordApprovalDecision(tempStudentId, {
+      status: "approved",
+      decidedByUserId: "admin-1",
+      decidedAt: new Date().toISOString(),
+    });
 
-    assert.equal(activated.status, "active");
+    assert.equal(approved.adminApprovalStatus, "approved");
   });
 
   it("step 7 - login after activation returns 200 with an access token", async () => {
@@ -430,7 +423,8 @@ describe("auth flow: registration -> email verification -> student login", () =>
     assert.equal(user["id"], tempStudentId, "the id is the same one registration returned");
     assert.equal(user["email"], "ananya@test.local");
     assert.equal(user["role"], "student");
-    assert.equal(user["status"], "active");
+    // Approval, not activation, opened the account (CL-001 decision 2).
+    assert.equal(user["status"], "pending");
   });
 
   it("step 7b - the refresh token is NOT returned (decision D4)", async () => {
@@ -612,9 +606,14 @@ describe("auth flow: incorrect password handling", () => {
     );
     userId = (registered["data"] as Record<string, unknown>)["tempStudentId"] as string;
 
-    // Activated so that a password refusal cannot be confused with a status
-    // refusal - this isolates the credential check.
-    await h.users.setStatus(userId, "active");
+    // Verified and approved so that a password refusal cannot be confused
+    // with an account refusal - this isolates the credential check.
+    await h.students.markVerified(userId, "email");
+    await h.students.recordApprovalDecision(userId, {
+      status: "approved",
+      decidedByUserId: "admin-1",
+      decidedAt: new Date().toISOString(),
+    });
   });
 
   afterEach(async () => {

@@ -1,6 +1,9 @@
 import type { ConnectionPool } from "mssql";
 import sql from "mssql";
-import type { PaymentRepository } from "./payment.repository";
+import { ManualPaymentRuleError, type ManualPaymentInput, type PaymentRepository } from "./payment.repository";
+import { writeAuditLog } from "../admin/sqlserver-admin.repository";
+import { DuplicateRecordError } from "../../repositories/repository.errors";
+import { writeEnrollmentStatusHistory, writeFinancialAuditHistory } from "../../db/history-writers";
 import type {
   PaymentOrder,
   PaymentTransaction,
@@ -350,36 +353,159 @@ export class SqlServerPaymentRepository implements PaymentRepository {
     };
   }
 
-  async recordManualPayment(input: Omit<ManualPaymentRecord, "id" | "createdAt">): Promise<ManualPaymentRecord> {
+  async recordManualPayment(input: ManualPaymentInput): Promise<ManualPaymentRecord> {
+    if (!/^[0-9]+$/.test(input.enrollmentId) || !/^[0-9]+$/.test(input.studentUserId)) {
+      throw new ManualPaymentRuleError("ENROLLMENT_NOT_FOUND", "Enrollment not found", 404);
+    }
     const pool = await this.getPool();
-    const result = await pool
-      .request()
-      .input("studentUserId", sql.BigInt, Number(input.studentUserId) || 0)
-      .input("enrollmentId", sql.BigInt, Number(input.enrollmentId) || 0)
-      .input("amount", sql.Decimal(12, 2), input.amount)
-      .input("paymentMode", sql.VarChar(30), input.paymentMode)
-      .input("referenceNumber", sql.VarChar(100), input.referenceNumber)
-      .input("proofObjectKey", sql.NVarChar(700), input.proofObjectKey ?? null)
-      .input("verificationStatus", sql.VarChar(20), input.verificationStatus)
-      .input("enteredByUserId", sql.BigInt, Number(input.enteredByUserId) || 0)
-      .query(`
-        INSERT INTO dbo.NXA_ManualPaymentRecords (
-          StudentUserId, EnrollmentId, Amount, PaymentMode, ReferenceNumber,
-          ProofObjectKey, VerificationStatus, EnteredByUserId, CreatedAt
-        )
-        OUTPUT INSERTED.ManualPaymentRecordId, INSERTED.CreatedAt
-        VALUES (
-          @studentUserId, @enrollmentId, @amount, @paymentMode, @referenceNumber,
-          @proofObjectKey, @verificationStatus, @enteredByUserId, SYSUTCDATETIME()
-        )
-      `);
+    const tx = pool.transaction();
+    await tx.begin();
 
-    const row = result.recordset[0];
-    return {
-      ...input,
-      id: String(row.ManualPaymentRecordId),
-      createdAt: row.CreatedAt.toISOString(),
-    };
+    try {
+      const enr = await tx
+        .request()
+        .input("enrollmentId", sql.BigInt, input.enrollmentId)
+        .query<{ StudentUserId: number | bigint; EnrollmentStatus: string; FinalAmount: number | string }>(`
+          SELECT StudentUserId, EnrollmentStatus, FinalAmount
+          FROM dbo.NXA_Enrollments WITH (UPDLOCK)
+          WHERE EnrollmentId = @enrollmentId
+        `);
+      const row = enr.recordset[0];
+      if (!row) throw new ManualPaymentRuleError("ENROLLMENT_NOT_FOUND", "Enrollment not found", 404);
+      if (String(row.StudentUserId) !== input.studentUserId) {
+        throw new ManualPaymentRuleError("ENROLLMENT_STUDENT_MISMATCH", "The enrollment does not belong to this student", 422);
+      }
+      if (row.EnrollmentStatus.toUpperCase() !== "APPROVED_UNPAID") {
+        throw new ManualPaymentRuleError(
+          "ENROLLMENT_NOT_AWAITING_PAYMENT",
+          `This enrollment is ${row.EnrollmentStatus.toLowerCase()} and is not awaiting payment`,
+          409,
+        );
+      }
+      const due = Math.round(Number(row.FinalAmount) * 100);
+      if (Math.round(input.amount * 100) !== due) {
+        throw new ManualPaymentRuleError(
+          "AMOUNT_MISMATCH",
+          `The payment must equal the full amount due (${(due / 100).toFixed(2)}); installments are not supported`,
+          422,
+        );
+      }
+
+      // The same offline payment (mode + reference) cannot be recorded twice.
+      const dup = await tx
+        .request()
+        .input("dupMode", sql.VarChar(30), input.paymentMode)
+        .input("dupRef", sql.VarChar(100), input.referenceNumber)
+        .query<{ ManualPaymentRecordId: number | bigint }>(`
+          SELECT TOP 1 ManualPaymentRecordId
+          FROM dbo.NXA_ManualPaymentRecords WITH (UPDLOCK, HOLDLOCK)
+          WHERE PaymentMode = @dupMode AND UPPER(LTRIM(RTRIM(ReferenceNumber))) = UPPER(@dupRef)
+        `);
+      if (dup.recordset.length > 0) {
+        throw new ManualPaymentRuleError(
+          "DUPLICATE_PAYMENT_REFERENCE",
+          `A ${input.paymentMode} payment with reference ${input.referenceNumber} is already recorded (manual payment ${String(dup.recordset[0]!.ManualPaymentRecordId)})`,
+          409,
+        );
+      }
+
+      const ins = await tx
+        .request()
+        .input("studentUserId", sql.BigInt, input.studentUserId)
+        .input("enrollmentId", sql.BigInt, input.enrollmentId)
+        .input("amount", sql.Decimal(12, 2), input.amount)
+        .input("paymentMode", sql.VarChar(30), input.paymentMode)
+        .input("referenceNumber", sql.VarChar(100), input.referenceNumber)
+        .input("proofObjectKey", sql.NVarChar(700), input.proofObjectKey ?? null)
+        .input("enteredByUserId", sql.BigInt, input.enteredByUserId)
+        .query<{ ManualPaymentRecordId: number | bigint; CreatedAt: Date; VerifiedAt: Date }>(`
+          INSERT INTO dbo.NXA_ManualPaymentRecords (
+            StudentUserId, EnrollmentId, Amount, PaymentMode, ReferenceNumber,
+            ProofObjectKey, VerificationStatus, VerifiedByUserId, VerifiedAt, EnteredByUserId, CreatedAt
+          )
+          OUTPUT INSERTED.ManualPaymentRecordId, INSERTED.CreatedAt, INSERTED.VerifiedAt
+          VALUES (
+            @studentUserId, @enrollmentId, @amount, @paymentMode, @referenceNumber,
+            @proofObjectKey, 'verified', @enteredByUserId, SYSUTCDATETIME(), @enteredByUserId, SYSUTCDATETIME()
+          )
+        `);
+      const rec = ins.recordset[0]!;
+
+      await tx
+        .request()
+        .input("enrollmentId", sql.BigInt, input.enrollmentId)
+        .query(`
+          UPDATE dbo.NXA_Enrollments
+          SET EnrollmentStatus = 'ACTIVE',
+              ActivatedAt = COALESCE(ActivatedAt, SYSUTCDATETIME()),
+              UpdatedAt = SYSUTCDATETIME()
+          WHERE EnrollmentId = @enrollmentId
+        `);
+
+      await writeAuditLog(tx.request(), {
+        actorUserId: input.enteredByUserId,
+        actionType: "RECORD_MANUAL_PAYMENT",
+        moduleCode: "PAYMENT_MGMT",
+        entityName: "Enrollment",
+        entityId: input.enrollmentId,
+        oldValues: JSON.stringify({ status: "approved_unpaid" }),
+        newValues: JSON.stringify({
+          status: "active",
+          manualPaymentId: String(rec.ManualPaymentRecordId),
+          amount: input.amount,
+          paymentMode: input.paymentMode,
+          referenceNumber: input.referenceNumber,
+        }),
+      });
+
+      const manualPaymentId = String(rec.ManualPaymentRecordId);
+      await writeEnrollmentStatusHistory(tx.request(), {
+        enrollmentId: input.enrollmentId,
+        oldStatus: row.EnrollmentStatus,
+        newStatus: "ACTIVE",
+        changedByUserId: input.enteredByUserId,
+        reason: `Manual payment ${manualPaymentId} recorded (${input.paymentMode}, reference ${input.referenceNumber})`,
+      });
+      // PAY-013 / BR: manual payments must have audit records.
+      await writeFinancialAuditHistory(tx.request(), {
+        entityType: "ManualPayment",
+        entityId: manualPaymentId,
+        actionType: "RECORD_MANUAL_PAYMENT",
+        performedByUserId: input.enteredByUserId,
+        newValues: {
+          enrollmentId: input.enrollmentId,
+          studentUserId: input.studentUserId,
+          amount: input.amount,
+          paymentMode: input.paymentMode,
+          referenceNumber: input.referenceNumber,
+          verificationStatus: "verified",
+        },
+      });
+
+      await tx.commit();
+
+      return {
+        id: String(rec.ManualPaymentRecordId),
+        studentUserId: input.studentUserId,
+        enrollmentId: input.enrollmentId,
+        amount: input.amount,
+        paymentMode: input.paymentMode,
+        referenceNumber: input.referenceNumber,
+        ...(input.proofObjectKey ? { proofObjectKey: input.proofObjectKey } : {}),
+        verificationStatus: "verified",
+        verifiedByUserId: input.enteredByUserId,
+        verifiedAt: rec.VerifiedAt.toISOString(),
+        enteredByUserId: input.enteredByUserId,
+        createdAt: rec.CreatedAt.toISOString(),
+      };
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // already rolled back
+      }
+      throw err;
+    }
   }
 
   async getManualPayments(): Promise<ManualPaymentRecord[]> {
@@ -388,7 +514,7 @@ export class SqlServerPaymentRepository implements PaymentRepository {
       SELECT m.ManualPaymentRecordId, m.StudentUserId, m.EnrollmentId, m.Amount,
              m.PaymentMode, m.ReferenceNumber, m.ProofObjectKey, m.VerificationStatus,
              m.VerifiedByUserId, m.VerifiedAt, m.EnteredByUserId, m.CreatedAt,
-             u.FullName AS StudentName, c.Title AS CourseTitle, c.CourseId
+             u.FullName AS StudentName, c.CourseName AS CourseTitle, c.CourseId
       FROM dbo.NXA_ManualPaymentRecords m
       LEFT JOIN dbo.NXA_Users u ON m.StudentUserId = u.UserId
       LEFT JOIN dbo.NXA_Enrollments e ON m.EnrollmentId = e.EnrollmentId
@@ -415,27 +541,6 @@ export class SqlServerPaymentRepository implements PaymentRepository {
     }));
   }
 
-  async verifyManualPayment(id: string, status: "verified" | "rejected", verifiedByUserId: string): Promise<ManualPaymentRecord> {
-    const pool = await this.getPool();
-    await pool
-      .request()
-      .input("id", sql.BigInt, Number(id) || 0)
-      .input("status", sql.VarChar(20), status)
-      .input("verifiedByUserId", sql.BigInt, Number(verifiedByUserId) || 0)
-      .query(`
-        UPDATE dbo.NXA_ManualPaymentRecords
-        SET VerificationStatus = @status,
-            VerifiedByUserId = @verifiedByUserId,
-            VerifiedAt = SYSUTCDATETIME()
-        WHERE ManualPaymentRecordId = @id
-      `);
-
-    const list = await this.getManualPayments();
-    const match = list.find((m) => m.id === id);
-    if (!match) throw new Error("Manual payment record not found after verification");
-    return match;
-  }
-
   async getPaymentsByStudentId(studentId: string): Promise<PaymentTransaction[]> {
     const pool = await this.getPool();
     const result = await pool
@@ -445,7 +550,7 @@ export class SqlServerPaymentRepository implements PaymentRepository {
         SELECT t.TransactionId, t.PaymentOrderId, t.GatewayPaymentId, t.PaymentMethod,
                t.Amount, t.CurrencyCode, t.TransactionStatus, t.GatewaySignatureValid,
                t.GatewayPayload, t.CreatedAt, r.ReceiptNumber,
-               o.StudentUserId, u.FullName AS StudentName, c.CourseId, c.Title AS CourseTitle
+               o.StudentUserId, u.FullName AS StudentName, c.CourseId, c.CourseName AS CourseTitle
         FROM dbo.NXA_Transactions t
         INNER JOIN dbo.NXA_PaymentOrders o ON t.PaymentOrderId = o.PaymentOrderId
         LEFT JOIN dbo.NXA_PaymentReceipts r ON t.TransactionId = r.TransactionId
@@ -482,7 +587,7 @@ export class SqlServerPaymentRepository implements PaymentRepository {
       SELECT t.TransactionId, t.PaymentOrderId, t.GatewayPaymentId, t.PaymentMethod,
              t.Amount, t.CurrencyCode, t.TransactionStatus, t.GatewaySignatureValid,
              t.GatewayPayload, t.CreatedAt, r.ReceiptNumber,
-             o.StudentUserId, u.FullName AS StudentName, c.CourseId, c.Title AS CourseTitle
+             o.StudentUserId, u.FullName AS StudentName, c.CourseId, c.CourseName AS CourseTitle
       FROM dbo.NXA_Transactions t
       INNER JOIN dbo.NXA_PaymentOrders o ON t.PaymentOrderId = o.PaymentOrderId
       LEFT JOIN dbo.NXA_PaymentReceipts r ON t.TransactionId = r.TransactionId
@@ -512,99 +617,185 @@ export class SqlServerPaymentRepository implements PaymentRepository {
     }));
   }
 
+  /**
+   * Coupons as the live schema stores them: NXA_Coupons (code, limits, usage)
+   * joined to the NXA_Discounts row it applies (type, value, validity).
+   */
+  private static readonly COUPON_SELECT = `
+    SELECT c.CouponId, c.CouponCode, c.IsActive AS CouponActive, c.UsageLimit, c.PerUserLimit, c.UsageCount,
+           d.DiscountId, d.DiscountName, d.DiscountType, d.DiscountValue, d.StartsAt, d.EndsAt,
+           d.IsActive AS DiscountActive
+    FROM dbo.NXA_Coupons c
+    JOIN dbo.NXA_Discounts d ON d.DiscountId = c.DiscountId
+  `;
+
+  private static toCoupon(row: {
+    CouponId: number | bigint;
+    CouponCode: string;
+    CouponActive: boolean;
+    UsageLimit: number | null;
+    PerUserLimit: number | null;
+    UsageCount: number;
+    DiscountId: number | bigint;
+    DiscountName: string;
+    DiscountType: string;
+    DiscountValue: number | string;
+    StartsAt: Date | null;
+    EndsAt: Date | null;
+    DiscountActive: boolean;
+  }): CouponDiscount {
+    return {
+      id: String(row.CouponId),
+      discountId: String(row.DiscountId),
+      code: row.CouponCode,
+      description: row.DiscountName,
+      discountType: (row.DiscountType ?? "").toLowerCase() === "percentage" ? "percentage" : "fixed_amount",
+      value: Number(row.DiscountValue),
+      applicableCourseIds: [],
+      isActive: Boolean(row.CouponActive) && Boolean(row.DiscountActive),
+      validUntil: row.EndsAt ? row.EndsAt.toISOString().slice(0, 10) : undefined,
+      startsAt: row.StartsAt ? row.StartsAt.toISOString() : undefined,
+      endsAt: row.EndsAt ? row.EndsAt.toISOString() : undefined,
+      usageLimit: row.UsageLimit,
+      perUserLimit: row.PerUserLimit,
+      usageCount: Number(row.UsageCount ?? 0),
+    };
+  }
+
   async getDiscounts(): Promise<CouponDiscount[]> {
     const pool = await this.getPool();
-    const result = await pool.request().query(`
-      SELECT DiscountId, DiscountName, DiscountType, DiscountValue,
-             StartsAt, EndsAt, IsActive, CreatedAt
-      FROM dbo.NXA_Discounts
-      ORDER BY CreatedAt DESC
-    `);
-
-    return result.recordset.map((row) => ({
-      id: String(row.DiscountId),
-      code: row.DiscountName,
-      description: row.DiscountName,
-      discountType: row.DiscountType === "percentage" ? "percentage" : "fixed_amount",
-      value: Number(row.DiscountValue),
-      isActive: Boolean(row.IsActive),
-      validUntil: row.EndsAt ? row.EndsAt.toISOString().slice(0, 10) : undefined,
-    }));
+    const result = await pool.request().query(`${SqlServerPaymentRepository.COUPON_SELECT} ORDER BY c.CreatedAt DESC`);
+    return result.recordset.map((row) => SqlServerPaymentRepository.toCoupon(row));
   }
 
   async getDiscountByCode(code: string): Promise<CouponDiscount | null> {
     const pool = await this.getPool();
     const result = await pool
       .request()
-      .input("code", sql.NVarChar(150), code.trim().toUpperCase())
-      .query(`
-        SELECT DiscountId, DiscountName, DiscountType, DiscountValue,
-               StartsAt, EndsAt, IsActive, CreatedAt
-        FROM dbo.NXA_Discounts
-        WHERE UPPER(DiscountName) = @code
-      `);
-
-    if (result.recordset.length === 0) return null;
+      .input("code", sql.VarChar(40), code.trim().toUpperCase())
+      .query(`${SqlServerPaymentRepository.COUPON_SELECT} WHERE c.CouponCode = @code`);
     const row = result.recordset[0];
-    return {
-      id: String(row.DiscountId),
-      code: row.DiscountName,
-      description: row.DiscountName,
-      discountType: row.DiscountType === "percentage" ? "percentage" : "fixed_amount",
-      value: Number(row.DiscountValue),
-      isActive: Boolean(row.IsActive),
-      validUntil: row.EndsAt ? row.EndsAt.toISOString().slice(0, 10) : undefined,
-    };
+    return row ? SqlServerPaymentRepository.toCoupon(row) : null;
   }
 
-  async createDiscount(discount: Omit<CouponDiscount, "id">): Promise<CouponDiscount> {
+  async countCouponRedemptions(couponId: string, studentUserId: string): Promise<number> {
+    if (!/^\d+$/.test(couponId) || !/^\d+$/.test(studentUserId)) return 0;
     const pool = await this.getPool();
+    // Every recorded redemption counts: the allowed RedemptionStatus values are
+    // not visible to the application, so none is excluded.
     const result = await pool
       .request()
-      .input("name", sql.NVarChar(150), discount.code.trim().toUpperCase())
-      .input("type", sql.VarChar(15), discount.discountType)
-      .input("value", sql.Decimal(12, 2), discount.value)
-      .input("isActive", sql.Bit, discount.isActive ? 1 : 0)
-      .input("endsAt", sql.DateTime2(0), discount.validUntil ? new Date(discount.validUntil) : null)
-      .query(`
-        INSERT INTO dbo.NXA_Discounts (DiscountName, DiscountType, DiscountValue, IsActive, StartsAt, EndsAt, CreatedAt)
-        OUTPUT INSERTED.DiscountId
-        VALUES (@name, @type, @value, @isActive, SYSUTCDATETIME(), @endsAt, SYSUTCDATETIME())
+      .input("couponId", sql.BigInt, couponId)
+      .input("studentId", sql.BigInt, studentUserId)
+      .query<{ cnt: number }>(`
+        SELECT COUNT(1) AS cnt FROM dbo.NXA_CouponRedemptions
+        WHERE CouponId = @couponId AND StudentUserId = @studentId
       `);
+    return Number(result.recordset[0]?.cnt ?? 0);
+  }
 
-    const row = result.recordset[0];
+  async createDiscount(discount: Omit<CouponDiscount, "id">, createdByUserId?: string | undefined): Promise<CouponDiscount> {
+    const code = discount.code.trim().toUpperCase();
+    const pool = await this.getPool();
+    const tx = pool.transaction();
+    await tx.begin();
+    let couponId: string;
+    let discountId: string;
+    try {
+      const dReq = tx.request();
+      dReq.input("name", sql.NVarChar(150), discount.description.trim());
+      dReq.input("type", sql.VarChar(15), discount.discountType);
+      dReq.input("value", sql.Decimal(12, 2), discount.value);
+      dReq.input("isActive", sql.Bit, discount.isActive ? 1 : 0);
+      dReq.input("endsAt", sql.DateTime2(0), discount.validUntil ? new Date(discount.validUntil) : null);
+      dReq.input("createdBy", sql.BigInt, createdByUserId && /^\d+$/.test(createdByUserId) ? createdByUserId : null);
+      const d = await dReq.query<{ DiscountId: number | bigint }>(`
+        INSERT INTO dbo.NXA_Discounts (DiscountName, DiscountType, DiscountValue, IsActive, StartsAt, EndsAt, CreatedByUserId, CreatedAt)
+        OUTPUT INSERTED.DiscountId
+        VALUES (@name, @type, @value, @isActive, SYSUTCDATETIME(), @endsAt, @createdBy, SYSUTCDATETIME())
+      `);
+      discountId = String(d.recordset[0]?.DiscountId);
+
+      const cReq = tx.request();
+      cReq.input("code", sql.VarChar(40), code);
+      cReq.input("discountId", sql.BigInt, discountId);
+      cReq.input("isActive", sql.Bit, discount.isActive ? 1 : 0);
+      cReq.input("usageLimit", sql.Int, discount.usageLimit ?? null);
+      cReq.input("perUserLimit", sql.Int, discount.perUserLimit ?? null);
+      const c = await cReq.query<{ CouponId: number | bigint }>(`
+        INSERT INTO dbo.NXA_Coupons (CouponCode, DiscountId, IsActive, UsageLimit, PerUserLimit, UsageCount, CreatedAt)
+        OUTPUT INSERTED.CouponId
+        VALUES (@code, @discountId, @isActive, @usageLimit, @perUserLimit, 0, SYSUTCDATETIME())
+      `);
+      couponId = String(c.recordset[0]?.CouponId);
+
+      if (createdByUserId && /^\d+$/.test(createdByUserId)) {
+        await writeAuditLog(tx.request(), {
+          actorUserId: createdByUserId,
+          actionType: "CREATE_COUPON",
+          moduleCode: "FINANCE",
+          entityName: "Coupon",
+          entityId: couponId,
+          newValues: JSON.stringify({
+            code,
+            discountId,
+            discountType: discount.discountType,
+            value: discount.value,
+            usageLimit: discount.usageLimit ?? null,
+            perUserLimit: discount.perUserLimit ?? null,
+            isActive: discount.isActive,
+          }),
+        });
+        // PAY-013: coupon (and its discount) definition.
+        await writeFinancialAuditHistory(tx.request(), {
+          entityType: "Coupon",
+          entityId: couponId,
+          actionType: "CREATE_COUPON",
+          performedByUserId: createdByUserId,
+          newValues: {
+            code,
+            discountId,
+            discountType: discount.discountType,
+            value: discount.value,
+            usageLimit: discount.usageLimit ?? null,
+            perUserLimit: discount.perUserLimit ?? null,
+            isActive: discount.isActive,
+            validUntil: discount.validUntil ?? null,
+          },
+        });
+      }
+
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // the original error is the one worth reporting
+      }
+      const num = (err as { number?: number; originalError?: { info?: { number?: number } } })?.number ??
+        (err as { originalError?: { info?: { number?: number } } })?.originalError?.info?.number;
+      if (num === 2627 || num === 2601) throw new DuplicateRecordError("coupon", "code", code);
+      throw err;
+    }
+
     return {
       ...discount,
-      id: String(row.DiscountId),
+      id: couponId,
+      discountId,
+      code,
+      applicableCourseIds: [],
+      usageLimit: discount.usageLimit ?? null,
+      perUserLimit: discount.perUserLimit ?? null,
+      usageCount: 0,
     };
   }
 
-  async toggleDiscount(id: string): Promise<CouponDiscount> {
-    const pool = await this.getPool();
-    await pool
-      .request()
-      .input("id", sql.BigInt, Number(id) || 0)
-      .query(`
-        UPDATE dbo.NXA_Discounts
-        SET IsActive = CASE WHEN IsActive = 1 THEN 0 ELSE 1 END
-        WHERE DiscountId = @id
-      `);
-
-    const discounts = await this.getDiscounts();
-    const match = discounts.find((d) => d.id === id);
-    if (!match) throw new Error("Discount not found after toggle");
-    return match;
-  }
-
-  async deleteDiscount(id: string): Promise<boolean> {
-    const pool = await this.getPool();
-    await pool
-      .request()
-      .input("id", sql.BigInt, Number(id) || 0)
-      .query(`
-        DELETE FROM dbo.NXA_Discounts
-        WHERE DiscountId = @id
-      `);
-    return true;
+  /**
+   * Not supported: a coupon is referenced by its redemptions (and a discount by
+   * its coupons), so deleting would lose history. Deactivate it instead.
+   * Nothing is deleted.
+   */
+  async deleteDiscount(_id: string): Promise<boolean> {
+    throw new Error("Deleting a coupon is not supported; deactivate it instead.");
   }
 }
