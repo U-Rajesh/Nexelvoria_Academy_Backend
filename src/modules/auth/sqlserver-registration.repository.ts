@@ -33,7 +33,8 @@ export class SqlRepositoryError extends RepositoryError {
 }
 
 export interface SqlServerRegistrationOptions {
-  countryCode?: string;
+  countryCode?: string | undefined;
+  transactionFactory?: ((pool: sql.ConnectionPool) => sql.Transaction) | undefined;
 }
 
 /**
@@ -53,6 +54,7 @@ export class SqlServerStudentRegistrationRepository
   implements StudentRegistrationRepository
 {
   private readonly countryCode: string;
+  private readonly transactionFactory?: ((pool: sql.ConnectionPool) => sql.Transaction) | undefined;
 
   constructor(
     private readonly poolOrFactory:
@@ -61,6 +63,7 @@ export class SqlServerStudentRegistrationRepository
     options: SqlServerRegistrationOptions = {},
   ) {
     this.countryCode = options.countryCode ?? "+91";
+    this.transactionFactory = options.transactionFactory;
   }
 
   private async getPool(): Promise<sql.ConnectionPool> {
@@ -111,12 +114,17 @@ export class SqlServerStudentRegistrationRepository
     const normalizedMobile = `${this.countryCode}${mobile}`;
 
     const pool = await this.getPool();
-    const tx = new sql.Transaction(pool);
+    const tx = this.transactionFactory ? this.transactionFactory(pool) : new sql.Transaction(pool);
     await tx.begin();
+
+    const createReq = (): sql.Request =>
+      typeof (tx as { request?: () => sql.Request }).request === "function"
+        ? (tx as { request: () => sql.Request }).request()
+        : new sql.Request(tx);
 
     try {
       // 3. Pre-check uniqueness inside transaction with lock protection
-      const checkReq = new sql.Request(tx);
+      const checkReq = createReq();
       checkReq.input("normalizedEmail", sql.NVarChar(254), normalizedEmail);
       checkReq.input("normalizedMobile", sql.VarChar(25), normalizedMobile);
 
@@ -145,7 +153,7 @@ export class SqlServerStudentRegistrationRepository
       }
 
       // 4. Parameterized Insert into dbo.NXA_Users
-      const userReq = new sql.Request(tx);
+      const userReq = createReq();
       userReq.input("fullName", sql.NVarChar(150), name);
       userReq.input("email", sql.NVarChar(254), email);
       userReq.input("normalizedEmail", sql.NVarChar(254), normalizedEmail);
@@ -211,10 +219,12 @@ export class SqlServerStudentRegistrationRepository
       const degree = (degreePart || p.degreeBranch || "").slice(0, 100);
       const branch = (branchParts.length > 0 ? branchParts.join(" ") : p.degreeBranch || "").slice(0, 100);
       const passingYear = p.passingYear ? Number.parseInt(p.passingYear, 10) : null;
-      const dob = p.dateOfBirth ? new Date(p.dateOfBirth) : null;
+      const dob = p.dateOfBirth && !Number.isNaN(new Date(p.dateOfBirth).getTime())
+        ? new Date(p.dateOfBirth)
+        : null;
 
       // 6. Parameterized Insert into dbo.NXA_StudentProfiles
-      const profileReq = new sql.Request(tx);
+      const profileReq = createReq();
       profileReq.input("userId", sql.BigInt, userId);
       profileReq.input("collegeName", sql.NVarChar(200), (p.collegeName || "").slice(0, 200));
       profileReq.input("degree", sql.NVarChar(100), degree || null);
@@ -271,22 +281,29 @@ export class SqlServerStudentRegistrationRepository
 
       const studentProfileId = profileInsert.recordset[0]?.StudentProfileId;
 
-      // 7. Role mapping in dbo.NXA_UserRoles if student role exists
-      const roleReq = new sql.Request(tx);
+      // 7. Look up active Student role from dbo.NXA_Roles
+      const roleReq = createReq();
+      roleReq.input("roleCode", sql.VarChar(40), "student");
       const roleLookup = await roleReq.query<{ RoleId: number }>(`
-        SELECT RoleId FROM dbo.NXA_Roles WHERE RoleCode = 'student'
+        SELECT RoleId FROM dbo.NXA_Roles WHERE RoleCode = @roleCode AND IsActive = 1
       `);
 
-      if (roleLookup.recordset.length > 0 && roleLookup.recordset[0]) {
-        const studentRoleId = roleLookup.recordset[0].RoleId;
-        const assignRoleReq = new sql.Request(tx);
-        assignRoleReq.input("userId", sql.BigInt, userId);
-        assignRoleReq.input("roleId", sql.Int, studentRoleId);
-        await assignRoleReq.query(`
-          INSERT INTO dbo.NXA_UserRoles (UserId, RoleId, AssignedAt)
-          VALUES (@userId, @roleId, SYSUTCDATETIME())
-        `);
+      if (roleLookup.recordset.length === 0 || !roleLookup.recordset[0]) {
+        throw new SqlRepositoryError(
+          "role",
+          "lookup",
+          new Error("Active Student role ('student') is not configured in dbo.NXA_Roles. Registration aborted and rolled back."),
+        );
       }
+
+      const studentRoleId = roleLookup.recordset[0].RoleId;
+      const assignRoleReq = createReq();
+      assignRoleReq.input("userId", sql.BigInt, userId);
+      assignRoleReq.input("roleId", sql.Int, studentRoleId);
+      await assignRoleReq.query(`
+        INSERT INTO dbo.NXA_UserRoles (UserId, RoleId, AssignedAt)
+        VALUES (@userId, @roleId, SYSUTCDATETIME())
+      `);
 
       await tx.commit();
 
@@ -313,7 +330,11 @@ export class SqlServerStudentRegistrationRepository
         });
       }
 
-      if (err instanceof DuplicateRecordError || err instanceof RegistrationRejectedError) {
+      if (
+        err instanceof DuplicateRecordError ||
+        err instanceof RegistrationRejectedError ||
+        err instanceof SqlRepositoryError
+      ) {
         throw err;
       }
 

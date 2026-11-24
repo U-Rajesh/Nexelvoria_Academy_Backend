@@ -409,6 +409,9 @@ export const createRegistrationService = (
       logger.error("registration refused: the atomic registration failed", {
         errorType: describeError(err),
         isRepositoryError: err instanceof RepositoryError,
+        ...(err instanceof RepositoryError && "entity" in err ? { entity: (err as unknown as { entity: string }).entity } : {}),
+        ...(err instanceof RepositoryError && "operation" in err ? { operation: (err as unknown as { operation: string }).operation } : {}),
+        ...(err instanceof Error && err.cause instanceof Error ? { detail: err.cause.message } : {}),
       });
 
       return fail("registration_unavailable");
