@@ -24,6 +24,22 @@ import type {
  *
  * Maps to docs/api-contracts.md section 6 and Batch 3 LMS operations.
  */
+/** The teacher is not allocated to the batch / course the record belongs to (403). */
+export class TeacherAccessError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TeacherAccessError";
+  }
+}
+
+/** A well-formed request that breaks an assessment rule (422). */
+export class TeacherRuleError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = "TeacherRuleError";
+  }
+}
+
 export interface TeacherRepository {
   findById(id: EntityId): Promise<Teacher | null>;
 
@@ -81,7 +97,7 @@ export interface TeacherRepository {
       startsAt?: string | undefined;
       endsAt?: string | undefined;
     },
-    records: Array<{ studentUserId: string; status: "present" | "absent" | "late" | "excused"; remarks?: string | undefined }>,
+    records: Array<{ studentUserId: string; status: "present" | "absent" | "leave"; remarks?: string | undefined }>,
   ): Promise<ClassSessionRecord>;
 
   findAttendanceHistory(teacherId: EntityId, batchId?: EntityId): Promise<Array<{ session: ClassSessionRecord; records: AttendanceItem[] }>>;

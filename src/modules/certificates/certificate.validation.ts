@@ -12,5 +12,10 @@ export const issueCertificateSchema = z.object({
 });
 
 export const revokeCertificateSchema = z.object({
-  reason: z.string().min(5, "Revocation reason must be at least 5 characters"),
+  // NXA_CertificateRevocationHistory.Reason is nvarchar(500) NOT NULL.
+  reason: z
+    .string()
+    .trim()
+    .min(5, "Revocation reason must be at least 5 characters")
+    .max(500, "Revocation reason must be at most 500 characters"),
 });

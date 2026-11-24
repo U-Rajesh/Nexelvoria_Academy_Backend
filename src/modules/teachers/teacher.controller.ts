@@ -83,7 +83,7 @@ export const createTeacherController = (service: TeacherService) => ({
     const total = records.length;
     const present = records.filter((r) => r.status === "present").length;
     const absent = records.filter((r) => r.status === "absent").length;
-    const leave = records.filter((r) => r.status === "excused" || r.status === "late").length;
+    const leave = records.filter((r) => r.status === "leave").length;
     const percentage = total > 0 ? Math.round((present / total) * 100) : 0;
     sendSuccess(res, {
       data: {
@@ -102,7 +102,10 @@ export const createTeacherController = (service: TeacherService) => ({
     const batchId = req.query["batchId"] ? String(req.query["batchId"]) : undefined;
     const courseId = req.query["courseId"] ? String(req.query["courseId"]) : undefined;
     const teacherId = req.principal?.role === "teacher" ? req.principal.id : undefined;
-    const assignments = await service.getAssignments(teacherId, batchId, courseId);
+    const assignments =
+      req.principal?.role === "student"
+        ? await service.getAssignmentsForStudent(req.principal.id, batchId, courseId)
+        : await service.getAssignments(teacherId, batchId, courseId);
     sendSuccess(res, { data: assignments });
   },
 
@@ -136,7 +139,10 @@ export const createTeacherController = (service: TeacherService) => ({
 
   async getMaterials(req: Request, res: Response): Promise<void> {
     const lessonId = String(req.query["lessonId"] ?? "");
-    const materials = await service.getMaterials(lessonId);
+    const materials =
+      req.principal?.role === "student"
+        ? await service.getMaterialsForStudent(req.principal.id, lessonId)
+        : await service.getMaterials(lessonId);
     sendSuccess(res, { data: materials });
   },
 
@@ -157,7 +163,10 @@ export const createTeacherController = (service: TeacherService) => ({
   async getDoubts(req: Request, res: Response): Promise<void> {
     const courseId = req.query["courseId"] ? String(req.query["courseId"]) : undefined;
     const lessonId = req.query["lessonId"] ? String(req.query["lessonId"]) : undefined;
-    const doubts = await service.getDoubts(courseId, lessonId);
+    const doubts =
+      req.principal?.role === "student"
+        ? await service.getDoubtsForStudent(req.principal.id, courseId, lessonId)
+        : await service.getDoubts(courseId, lessonId);
     sendSuccess(res, { data: doubts });
   },
 
@@ -176,6 +185,15 @@ export const createTeacherController = (service: TeacherService) => ({
     sendSuccess(res, { data: doubt, message: "Doubt resolved with instructor reply" });
   },
 
+  // LMS-004 / LMS-005
+  async getLessonOutline(req: Request, res: Response): Promise<void> {
+    sendSuccess(res, { data: await service.getLessonOutlineForStudent(actorId(req), String(req.params["courseId"])) });
+  },
+
+  async getLesson(req: Request, res: Response): Promise<void> {
+    sendSuccess(res, { data: await service.getLessonForStudent(actorId(req), String(req.params["courseId"]), String(req.params["lessonId"])) });
+  },
+
   async recordLessonProgress(req: Request, res: Response): Promise<void> {
     const lessonId = String(req.params["lessonId"]);
     const progress = await service.recordLessonProgress(
@@ -190,7 +208,10 @@ export const createTeacherController = (service: TeacherService) => ({
     const batchId = req.query["batchId"] ? String(req.query["batchId"]) : undefined;
     const courseId = req.query["courseId"] ? String(req.query["courseId"]) : undefined;
     const teacherId = req.principal?.role === "teacher" ? req.principal.id : undefined;
-    const tests = await service.getOnlineTests(teacherId, batchId, courseId);
+    const tests =
+      req.principal?.role === "student"
+        ? await service.getOnlineTestsForStudent(req.principal.id, batchId, courseId)
+        : await service.getOnlineTests(teacherId, batchId, courseId);
     sendSuccess(res, { data: tests });
   },
 

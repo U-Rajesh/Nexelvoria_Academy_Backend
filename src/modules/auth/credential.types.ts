@@ -88,6 +88,15 @@ export interface CredentialRecord {
   failedLoginAttempts: number;
 
   /**
+   * The stored lock flag (NXA_Users.IsLocked). It is set atomically with the
+   * failure that reaches the threshold in force AT THAT MOMENT, and cleared
+   * only by a password reset or an Admin unlock (D7). When it is known it is
+   * the lock state, so changing the threshold never locks or unlocks anyone
+   * retroactively. Absent (a store that does not carry it): the counter rule.
+   */
+  isLocked?: boolean;
+
+  /**
    * RESERVED. Nothing sets this today.
    *
    * The field is confirmed by the frontend (`StudentProfile.lockedUntil`)
@@ -315,12 +324,15 @@ export const remainingAttempts = (failedLoginAttempts: number, threshold: number
  * `threshold` is a parameter because it is policy, not data.
  */
 export const isCredentialLocked = (
-  credential: Pick<CredentialRecord, "failedLoginAttempts" | "lockedUntil">,
+  credential: Pick<CredentialRecord, "failedLoginAttempts" | "lockedUntil" | "isLocked">,
   threshold: number,
   now: Date = new Date(),
 ): boolean => {
-  // Counter first: it is the rule that is actually in force.
-  if (credential.failedLoginAttempts >= threshold) {
+  // D7: the stored flag, when known, is the lock state (non-retroactive
+  // threshold changes). Otherwise the counter rule.
+  if (credential.isLocked !== undefined) {
+    if (credential.isLocked) return true;
+  } else if (credential.failedLoginAttempts >= threshold) {
     return true;
   }
 
@@ -334,7 +346,7 @@ export const isCredentialLocked = (
 
 /** Builds the state summary for a record. */
 export const toLockoutState = (
-  credential: Pick<CredentialRecord, "failedLoginAttempts" | "lockedUntil">,
+  credential: Pick<CredentialRecord, "failedLoginAttempts" | "lockedUntil" | "isLocked">,
   threshold: number,
   now: Date = new Date(),
 ): CredentialLockoutState => ({
@@ -377,3 +389,9 @@ export const toCredentialSecurityView = (
     ? {}
     : { lastFailedLoginAt: credential.lastFailedLoginAt }),
 });
+
+/** D7: the Super Admin may set 3-10; anything else (never saved, invalid) is the current 5. */
+export const LOCKOUT_THRESHOLD_MIN = 3;
+export const LOCKOUT_THRESHOLD_MAX = 10;
+export const effectiveLockoutThreshold = (saved: number | undefined | null, fallback: number): number =>
+  typeof saved === "number" && Number.isInteger(saved) && saved >= LOCKOUT_THRESHOLD_MIN && saved <= LOCKOUT_THRESHOLD_MAX ? saved : fallback;

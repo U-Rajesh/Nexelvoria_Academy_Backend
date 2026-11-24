@@ -29,6 +29,14 @@ import type { PlacementRepository } from "../modules/placements/placement.reposi
 import { SqlServerPlacementRepository } from "../modules/placements/sqlserver-placement.repository";
 import type { SupportRepository } from "../modules/support/support.repository";
 import { SqlServerSupportRepository } from "../modules/support/sqlserver-support.repository";
+import type { AcademicsRepository } from "../modules/academics/academics.repository";
+import { SqlServerAcademicsRepository } from "../modules/academics/sqlserver-academics.repository";
+import type { FinanceRepository } from "../modules/finance/finance.repository";
+import { SqlServerFinanceRepository } from "../modules/finance/sqlserver-finance.repository";
+import type { ReportsRepository } from "../modules/reports/reports.repository";
+import { SqlServerReportsRepository } from "../modules/reports/sqlserver-reports.repository";
+import type { AccountSecurityRepository } from "../modules/auth/account-security.repository";
+import { SqlServerAccountSecurityRepository } from "../modules/auth/sqlserver-account-security.repository";
 
 /**
  * Dependency injection - deliberately hand-rolled, about 100 lines.
@@ -58,6 +66,10 @@ export interface RepositoryRegistry {
   certificates: CertificateRepository;
   placements: PlacementRepository;
   support: SupportRepository;
+  academics: AcademicsRepository;
+  finance: FinanceRepository;
+  reports: ReportsRepository;
+  accountSecurity: AccountSecurityRepository;
 }
 
 export type RepositoryName = keyof RepositoryRegistry;
@@ -156,6 +168,18 @@ export const createContainer = (factories: RepositoryFactories = {}): AppContain
     get support() {
       return resolve("support");
     },
+    get academics() {
+      return resolve("academics");
+    },
+    get finance() {
+      return resolve("finance");
+    },
+    get reports() {
+      return resolve("reports");
+    },
+    get accountSecurity() {
+      return resolve("accountSecurity");
+    },
   };
 
   return {
@@ -191,5 +215,9 @@ export const createProductionContainer = (): AppContainer => {
     certificates: () => new SqlServerCertificateRepository(getSqlServerPool),
     placements: () => new SqlServerPlacementRepository(getSqlServerPool),
     support: () => new SqlServerSupportRepository(getSqlServerPool),
+    academics: () => new SqlServerAcademicsRepository(getSqlServerPool),
+    finance: () => new SqlServerFinanceRepository(getSqlServerPool),
+    reports: () => new SqlServerReportsRepository(getSqlServerPool),
+    accountSecurity: () => new SqlServerAccountSecurityRepository(getSqlServerPool),
   });
 };

@@ -1,5 +1,11 @@
 import crypto from "node:crypto";
-import type { PaymentRepository } from "../../src/modules/payments/payment.repository";
+import { DuplicateRecordError } from "../../src/repositories/repository.errors";
+import { HistoryLog } from "./history-log";
+import {
+  ManualPaymentRuleError,
+  type ManualPaymentInput,
+  type PaymentRepository,
+} from "../../src/modules/payments/payment.repository";
 import type {
   CouponDiscount,
   ManualPaymentRecord,
@@ -24,6 +30,8 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     this.webhookEvents = [];
     this.manualPayments = [];
     this.discounts = [];
+    this.couponRedemptions = [];
+    this.history.reset();
   }
 
   async createPaymentOrder(order: Omit<PaymentOrder, "id" | "createdAt" | "updatedAt">): Promise<PaymentOrder> {
@@ -113,33 +121,73 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     );
   }
 
-  async recordManualPayment(input: Omit<ManualPaymentRecord, "id" | "createdAt">): Promise<ManualPaymentRecord> {
-    const id = crypto.randomUUID();
+  /**
+   * Enrollments a manual payment may settle, keyed by enrollment id. Mirrors
+   * the NXA_Enrollments row the SQL adapter locks and checks.
+   */
+  public manualPaymentTargets = new Map<
+    string,
+    { studentUserId: string; status: string; finalAmount: number }
+  >();
+  public manualPaymentAudit: { actorUserId: string; enrollmentId: string; amount: number }[] = [];
+  /** Mirrors NXA_EnrollmentStatusHistory / NXA_FinancialAuditHistory writes. */
+  public history = new HistoryLog();
+
+  async recordManualPayment(input: ManualPaymentInput): Promise<ManualPaymentRecord> {
+    const target = this.manualPaymentTargets.get(input.enrollmentId);
+    if (!target) throw new ManualPaymentRuleError("ENROLLMENT_NOT_FOUND", "Enrollment not found", 404);
+    if (target.studentUserId !== input.studentUserId) {
+      throw new ManualPaymentRuleError("ENROLLMENT_STUDENT_MISMATCH", "The enrollment does not belong to this student", 422);
+    }
+    if (target.status !== "approved_unpaid") {
+      throw new ManualPaymentRuleError("ENROLLMENT_NOT_AWAITING_PAYMENT", `This enrollment is ${target.status}`, 409);
+    }
+    if (Math.round(input.amount * 100) !== Math.round(target.finalAmount * 100)) {
+      throw new ManualPaymentRuleError("AMOUNT_MISMATCH", "The payment must equal the full amount due", 422);
+    }
+    const dup = this.manualPayments.find(
+      (p) => p.paymentMode === input.paymentMode && p.referenceNumber.trim().toUpperCase() === input.referenceNumber.trim().toUpperCase(),
+    );
+    if (dup) {
+      throw new ManualPaymentRuleError("DUPLICATE_PAYMENT_REFERENCE", `Reference already recorded (manual payment ${dup.id})`, 409);
+    }
     const now = new Date().toISOString();
     const newPayment: ManualPaymentRecord = {
-      ...input,
-      id,
+      id: crypto.randomUUID(),
+      studentUserId: input.studentUserId,
+      enrollmentId: input.enrollmentId,
+      amount: input.amount,
+      paymentMode: input.paymentMode,
+      referenceNumber: input.referenceNumber,
+      ...(input.proofObjectKey ? { proofObjectKey: input.proofObjectKey } : {}),
+      verificationStatus: "verified",
+      verifiedByUserId: input.enteredByUserId,
+      verifiedAt: now,
+      enteredByUserId: input.enteredByUserId,
       createdAt: now,
     };
     this.manualPayments.push(newPayment);
+    this.history.enrollmentStatus.push({
+      enrollmentId: input.enrollmentId,
+      oldStatus: target.status.toUpperCase(),
+      newStatus: "ACTIVE",
+      changedByUserId: input.enteredByUserId,
+      reason: `Manual payment ${newPayment.id} recorded (${input.paymentMode}, reference ${input.referenceNumber})`,
+    });
+    this.history.financial.push({
+      entityType: "ManualPayment",
+      entityId: newPayment.id,
+      actionType: "RECORD_MANUAL_PAYMENT",
+      performedByUserId: input.enteredByUserId,
+      newValues: { enrollmentId: input.enrollmentId, studentUserId: input.studentUserId, amount: input.amount },
+    });
+    target.status = "active";
+    this.manualPaymentAudit.push({ actorUserId: input.enteredByUserId, enrollmentId: input.enrollmentId, amount: input.amount });
     return newPayment;
   }
 
   async getManualPayments(): Promise<ManualPaymentRecord[]> {
     return [...this.manualPayments];
-  }
-
-  async verifyManualPayment(
-    id: string,
-    status: "verified" | "rejected",
-    verifiedByUserId: string
-  ): Promise<ManualPaymentRecord> {
-    const record = this.manualPayments.find((p) => p.id === id);
-    if (!record) throw new Error("Manual payment record not found.");
-    record.verificationStatus = status;
-    record.verifiedByUserId = verifiedByUserId;
-    record.verifiedAt = new Date().toISOString();
-    return record;
   }
 
   async getPaymentsByStudentId(studentId: string): Promise<PaymentTransaction[]> {
@@ -159,27 +207,37 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     return this.discounts.find((d) => d.code.toUpperCase() === code.toUpperCase()) ?? null;
   }
 
-  async createDiscount(discount: Omit<CouponDiscount, "id">): Promise<CouponDiscount> {
+  /** Redemptions seeded by tests: coupon id -> student ids (one entry per redemption). */
+  couponRedemptions: Array<{ couponId: string; studentUserId: string }> = [];
+
+  async countCouponRedemptions(couponId: string, studentUserId: string): Promise<number> {
+    return this.couponRedemptions.filter((r) => r.couponId === couponId && r.studentUserId === studentUserId).length;
+  }
+
+  async createDiscount(discount: Omit<CouponDiscount, "id">, createdByUserId?: string | undefined): Promise<CouponDiscount> {
+    if (this.discounts.some((d) => d.code.toUpperCase() === discount.code.toUpperCase())) {
+      throw new DuplicateRecordError("coupon", "code", discount.code);
+    }
     const id = crypto.randomUUID();
     const newDiscount: CouponDiscount = {
       ...discount,
       id,
     };
     this.discounts.push(newDiscount);
+    if (createdByUserId) {
+      this.history.financial.push({
+        entityType: "Coupon",
+        entityId: id,
+        actionType: "CREATE_COUPON",
+        performedByUserId: createdByUserId,
+        newValues: { code: discount.code, discountType: discount.discountType, value: discount.value },
+      });
+    }
     return newDiscount;
   }
 
-  async toggleDiscount(id: string): Promise<CouponDiscount> {
-    const disc = this.discounts.find((d) => d.id === id);
-    if (!disc) throw new Error("Discount not found.");
-    disc.isActive = !disc.isActive;
-    return disc;
-  }
-
-  async deleteDiscount(id: string): Promise<boolean> {
-    const idx = this.discounts.findIndex((d) => d.id === id);
-    if (idx === -1) return false;
-    this.discounts.splice(idx, 1);
-    return true;
+  /** Mirrors SQL: deleting a coupon is refused (redemptions reference it). */
+  async deleteDiscount(_id: string): Promise<boolean> {
+    throw new Error("Deleting a coupon is not supported; deactivate it instead.");
   }
 }

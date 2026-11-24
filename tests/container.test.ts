@@ -99,13 +99,13 @@ describe("dependency injection container", () => {
       );
     });
 
-    it("the full production container registers all 15 repositories", () => {
+    it("the full production container registers all 19 repositories", () => {
       const prev = process.env.TEST_FULL_PRODUCTION_CONTAINER;
       try {
         process.env.TEST_FULL_PRODUCTION_CONTAINER = "1";
         const production = createProductionContainer();
         const registered = production.registered();
-        assert.equal(registered.length, 15);
+        assert.equal(registered.length, 19);
         assert.equal(production.has("studentRegistration"), true);
         assert.equal(production.has("users"), true);
         assert.equal(production.has("credentials"), true);
@@ -121,6 +121,9 @@ describe("dependency injection container", () => {
         assert.equal(production.has("certificates"), true);
         assert.equal(production.has("placements"), true);
         assert.equal(production.has("support"), true);
+        assert.equal(production.has("academics"), true);
+        assert.equal(production.has("finance"), true);
+        assert.equal(production.has("accountSecurity"), true);
       } finally {
         if (prev !== undefined) {
           process.env.TEST_FULL_PRODUCTION_CONTAINER = prev;

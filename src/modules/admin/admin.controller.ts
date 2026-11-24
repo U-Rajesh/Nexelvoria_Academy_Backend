@@ -7,15 +7,21 @@ import { sendSuccess } from "../../utils/send";
 import type { AdminService } from "./admin.service";
 import type {
   AllocateTeacherBody,
+  BatchStatusValue,
+  EnrollmentStatusBody,
   CreateAdminBody,
   CreateBatchBody,
   CreateEnrollmentAdminBody,
   CreateRoleBody,
+  CreateStudentAdminBody,
   CreateTeacherAdminBody,
+  UpdateTeacherAdminBody,
+  TeacherStatusBody,
   FinancialOverrideDecisionBody,
   InstituteSettingsBody,
+  MaintenanceBody,
   RefundDecisionBody,
-  SystemConfigBody,
+  TestEmailBody,
   UpdateAdminBody,
   UpdateBatchBody,
   UpdateRolePermissionsBody,
@@ -61,8 +67,11 @@ export const createAdminController = (service: AdminService) => ({
   },
 
   async createAdmin(req: Request, res: Response): Promise<void> {
-    const created = await service.createAdmin(actorId(req), req.body as CreateAdminBody);
-    sendCreated(res, { data: created, message: "Admin account created successfully" });
+    const { account, temporaryPassword } = await service.createAdmin(actorId(req), req.body as CreateAdminBody);
+    sendCreated(res, {
+      data: { ...account, temporaryPassword },
+      message: "Admin account created. Share the one-time temporary password securely; it will not be shown again.",
+    });
   },
 
   async updateAdmin(req: Request, res: Response): Promise<void> {
@@ -81,7 +90,10 @@ export const createAdminController = (service: AdminService) => ({
   async resetAdminPassword(req: Request, res: Response): Promise<void> {
     const id = String(req.params["adminId"]);
     const result = await service.resetAdminPassword(actorId(req), id);
-    sendSuccess(res, { data: result, message: "Admin password reset successfully" });
+    sendSuccess(res, {
+      data: result,
+      message: "Temporary password issued and all of the admin's sessions were signed out. It will not be shown again.",
+    });
   },
 
   // Batches
@@ -112,7 +124,8 @@ export const createAdminController = (service: AdminService) => ({
 
   async setBatchStatus(req: Request, res: Response): Promise<void> {
     const id = String(req.params["batchId"]);
-    const status = String(req.body.status);
+    // Validated by batchStatusBodySchema at the route.
+    const { status } = req.body as { status: BatchStatusValue };
     const batch = await service.setBatchStatus(actorId(req), id, status);
     sendSuccess(res, { data: batch, message: "Batch status updated successfully" });
   },
@@ -153,8 +166,9 @@ export const createAdminController = (service: AdminService) => ({
 
   async setEnrollmentStatus(req: Request, res: Response): Promise<void> {
     const id = String(req.params["enrollmentId"]);
-    const status = String(req.body.status);
-    const enrollment = await service.setEnrollmentStatus(actorId(req), id, status);
+    // Validated by enrollmentStatusBodySchema at the route.
+    const { status, reason } = req.body as EnrollmentStatusBody;
+    const enrollment = await service.setEnrollmentStatus(actorId(req), id, status, reason);
     sendSuccess(res, { data: enrollment, message: "Enrollment status updated successfully" });
   },
 
@@ -168,6 +182,12 @@ export const createAdminController = (service: AdminService) => ({
     sendSuccess(res, { data: logs });
   },
 
+  /** D15: `GET /admin/dashboard/placement-rate?from=YYYY-MM-DD&to=YYYY-MM-DD` (IST, inclusive). */
+  async getPlacementRate(req: Request, res: Response): Promise<void> {
+    const q = req.validatedQuery as { from: string; to: string };
+    sendSuccess(res, { data: await service.getPlacementRate(q) });
+  },
+
   // Settings
   async getInstituteSettings(_req: Request, res: Response): Promise<void> {
     const settings = await service.getInstituteSettings();
@@ -175,8 +195,21 @@ export const createAdminController = (service: AdminService) => ({
   },
 
   async saveInstituteSettings(req: Request, res: Response): Promise<void> {
-    const saved = await service.saveInstituteSettings(actorId(req), req.body as InstituteSettingsBody);
+    const saved = await service.saveInstituteSettings(actorId(req), req.body as InstituteSettingsBody, req.principal?.role);
     sendSuccess(res, { data: saved, message: "Institute settings updated successfully" });
+  },
+
+  getSettingsCatalog(_req: Request, res: Response): void {
+    sendSuccess(res, { data: service.getSettingsCatalog() });
+  },
+
+  async getMaintenance(_req: Request, res: Response): Promise<void> {
+    sendSuccess(res, { data: await service.getMaintenance() });
+  },
+
+  async setMaintenance(req: Request, res: Response): Promise<void> {
+    const state = await service.setMaintenance(actorId(req), req.body as MaintenanceBody);
+    sendSuccess(res, { data: state, message: state.enabled ? "Maintenance mode is on." : "Maintenance mode is off." });
   },
 
   // System Config
@@ -185,13 +218,18 @@ export const createAdminController = (service: AdminService) => ({
     sendSuccess(res, { data: config });
   },
 
-  async saveSystemConfig(req: Request, res: Response): Promise<void> {
-    const saved = await service.saveSystemConfig(actorId(req), req.body as SystemConfigBody);
-    sendSuccess(res, { data: saved, message: "System configuration saved successfully" });
+  /** Always refused: platform configuration comes from the server environment. */
+  async saveSystemConfig(_req: Request, _res: Response): Promise<void> {
+    await service.saveSystemConfig();
   },
 
-  async testEmailConfiguration(_req: Request, res: Response): Promise<void> {
-    sendSuccess(res, { data: { success: true }, message: "SMTP test email sent successfully" });
+  async testEmailConfiguration(req: Request, res: Response): Promise<void> {
+    const { recipientEmail } = req.body as TestEmailBody;
+    const result = await service.sendTestEmail(actorId(req), recipientEmail);
+    sendSuccess(res, {
+      data: result,
+      message: `Test email accepted by the SMTP server for ${result.sentTo}.`,
+    });
   },
 
   // Refunds
@@ -254,8 +292,40 @@ export const createAdminController = (service: AdminService) => ({
     sendSuccess(res, { data: teachers });
   },
 
+  async updateTeacher(req: Request, res: Response): Promise<void> {
+    const id = String(req.params["teacherId"]);
+    const result = await service.updateTeacher(actorId(req), id, req.body as UpdateTeacherAdminBody);
+    sendSuccess(res, { data: result, message: result.changed ? "Teacher updated." : "Nothing changed." });
+  },
+
+  async setTeacherStatus(req: Request, res: Response): Promise<void> {
+    const id = String(req.params["teacherId"]);
+    const body = req.body as TeacherStatusBody;
+    const result = await service.setTeacherStatus(actorId(req), id, body);
+    sendSuccess(res, {
+      data: result,
+      message: !result.changed ? "The teacher already had this status." : body.status === "active" ? "Teacher activated." : "Teacher deactivated; their sessions were signed out.",
+    });
+  },
+
   async createTeacher(req: Request, res: Response): Promise<void> {
-    const teacher = await service.createTeacher(actorId(req), req.body as CreateTeacherAdminBody);
-    sendCreated(res, { data: teacher, message: "Teacher account created successfully" });
+    const { account, temporaryPassword } = await service.createTeacher(actorId(req), req.body as CreateTeacherAdminBody);
+    sendCreated(res, {
+      data: { ...account, temporaryPassword },
+      message: "Teacher account created. Share the one-time temporary password securely; it will not be shown again.",
+    });
+  },
+
+  async createStudent(req: Request, res: Response): Promise<void> {
+    const { account, temporaryPassword, verification } = await service.createStudent(
+      actorId(req),
+      req.body as CreateStudentAdminBody,
+    );
+    sendCreated(res, {
+      data: { ...account, temporaryPassword, verification },
+      message:
+        "Student account created and pending verification. Share the one-time temporary password securely; " +
+        "it will not be shown again. The student must verify email and mobile before approval.",
+    });
   },
 });

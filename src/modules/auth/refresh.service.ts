@@ -1,3 +1,5 @@
+import { decideStudentAccess } from "../students/student-access";
+import type { StudentRepository } from "../students/student.repository";
 import type { EntityId, IsoDateTime } from "../../contracts/identifier.contract";
 import type { UserStatus } from "../../contracts/user.contract";
 import type { UserRepository } from "../users/user.repository";
@@ -132,6 +134,12 @@ export type RefreshResult =
 export interface RefreshServiceDeps {
   users: UserRepository;
   sessions: SessionRepository;
+  /**
+   * CL-001: when supplied, students are admitted by `decideStudentAccess`
+   * (limited or approved), exactly as at sign-in. Without it, refresh keeps
+   * the strict `active`-only rule for everyone.
+   */
+  students?: StudentRepository;
 }
 
 /**
@@ -326,6 +334,25 @@ export const createRefreshService = (deps: RefreshServiceDeps): RefreshService =
     if (user === null) {
       logger.warn("refresh refused: user no longer exists", { userId });
       return { ok: false, reason: "user_not_authorized" };
+    }
+
+    if (user.role === "student" && deps.students !== undefined) {
+      let student;
+      try {
+        student = await deps.students.findById(userId);
+      } catch (err) {
+        logger.error("refresh refused: student state could not be read", { userId, errorType: describeError(err) });
+        return { ok: false, reason: "refresh_unavailable" };
+      }
+      const decision = decideStudentAccess({
+        status: user.status,
+        student: student === null ? null : { adminApprovalStatus: student.adminApprovalStatus, isEmailVerified: student.isEmailVerified },
+      });
+      if (!decision.allowed) {
+        logger.warn("refresh refused: student account not permitted", { userId, reason: decision.reason });
+        return { ok: false, reason: "user_not_authorized" };
+      }
+      return { ok: true, user };
     }
 
     if (user.status !== REQUIRED_STATUS) {

@@ -38,7 +38,19 @@ const actorId = (req: Request): string => {
   return id;
 };
 
-export const createStudentController = (service: StudentService) => ({
+/**
+ * Optional admin-side effects wired by the route registry. Approval and
+ * status decisions are audited by the student repository in the same
+ * transaction as the change (SEC audit logs), not through a sink.
+ */
+export interface StudentAdminEffects {
+  /** Revokes all live sessions of a user (suspension / deactivation). */
+  revokeSessions?: (userId: string) => Promise<void>;
+}
+
+export const createStudentController = (service: StudentService, effects: StudentAdminEffects = {}) => {
+
+  return {
   async list(req: Request, res: Response): Promise<void> {
     const query = req.validatedQuery as StudentListQuery;
     const result = await service.listStudents(query);
@@ -63,7 +75,11 @@ export const createStudentController = (service: StudentService) => ({
     const { studentId } = req.params as StudentIdParams;
     const { remarks } = req.body as StudentApproveBody;
 
-    const student = await service.approveStudent(studentId, actorId(req), remarks);
+    const student = await service.approveStudent(studentId, actorId(req), remarks, {
+      actorUserId: actorId(req),
+      actionType: "APPROVE_STUDENT",
+      newValues: JSON.stringify({ approvalStatus: "approved", ...(remarks ? { remarks } : {}) }),
+    });
 
     sendSuccess(res, {
       data: student,
@@ -76,7 +92,11 @@ export const createStudentController = (service: StudentService) => ({
     const { studentId } = req.params as StudentIdParams;
     const { remarks } = req.body as StudentRejectBody;
 
-    const student = await service.rejectStudent(studentId, actorId(req), remarks);
+    const student = await service.rejectStudent(studentId, actorId(req), remarks, {
+      actorUserId: actorId(req),
+      actionType: "REJECT_STUDENT",
+      newValues: JSON.stringify({ approvalStatus: "rejected", remarks }),
+    });
 
     sendSuccess(res, { data: student, message: "Registration rejected." });
   },
@@ -84,7 +104,24 @@ export const createStudentController = (service: StudentService) => ({
   async setStatus(req: Request, res: Response): Promise<void> {
     const { studentId } = req.params as StudentIdParams;
     const { status } = req.body as StudentStatusBody;
-    const student = await service.setStudentStatus(studentId, status);
+    const before = await service.getStudentById(studentId);
+    if (before.status === status) {
+      // A no-op writes nothing and is not audited as a change.
+      sendSuccess(res, { data: before, message: `Student status is already ${status}; nothing changed.` });
+      return;
+    }
+    // The change and its audit row commit together; sessions are revoked
+    // only after that commit.
+    const student = await service.setStudentStatus(studentId, status, {
+      actorUserId: actorId(req),
+      actionType: "SET_STUDENT_STATUS",
+      oldValues: JSON.stringify({ status: before.status }),
+      newValues: JSON.stringify({ status }),
+    });
+    if (status !== "active" && effects.revokeSessions) {
+      // A suspended / deactivated student loses access now, not at token expiry.
+      await effects.revokeSessions(studentId);
+    }
     sendSuccess(res, { data: student, message: `Student status set to ${student.status}` });
   },
 
@@ -102,6 +139,7 @@ export const createStudentController = (service: StudentService) => ({
     );
     sendSuccess(res, { data: student, message: "Profile updated successfully" });
   },
-});
+  };
+};
 
 export type StudentController = ReturnType<typeof createStudentController>;

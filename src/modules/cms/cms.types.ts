@@ -82,7 +82,15 @@ export interface TrainerProfile {
   avatarUrl: string;
   formerCompanies: string[];
   linkedinUrl: string;
+  /**
+   * Titles of the linked courses. Since PUB-006 this is derived by the server
+   * from `courseIds` (real NXA_Courses rows) and is no longer free text.
+   */
   coursesTaught: string[];
+  /** PUB-006: linked course ids (NXA_Courses.CourseId), stored with the profile. */
+  courseIds?: string[] | undefined;
+  /** Response only: the linked courses (public responses list published courses only). */
+  linkedCourses?: Array<{ id: string; title: string; slug: string }> | undefined;
   type?: 'trainer' | 'mentor' | undefined;
   isActive: boolean;
   displayOrder?: number | undefined;
@@ -101,14 +109,24 @@ export interface CareerOpening {
   isActive: boolean;
 }
 
+/**
+ * A hiring partner is an NXA_Companies row. The live table has no logo,
+ * featured or display-order column: those fields are accepted on input for
+ * compatibility but never stored, and are absent from stored records.
+ */
 export interface HiringPartner {
   id: string;
   name: string;
-  logoUrl: string;
-  industry: string;
-  placementsCount: number;
-  isFeatured: boolean;
+  /** Not stored (no NXA_Companies column); always absent when read. */
+  logoUrl?: string | undefined;
+  industry?: string | undefined;
+  websiteUrl?: string | undefined;
+  /** Read: real count of NXA_PlacementRecords for the company. Not stored. */
+  placementsCount?: number | undefined;
+  /** Not stored (no column); always absent when read. */
+  isFeatured?: boolean | undefined;
   isActive: boolean;
+  /** Not stored (no column); always absent when read. */
   displayOrder?: number | undefined;
 }
 
@@ -140,6 +158,8 @@ export interface CorporateTrainingService {
   deliveryMode: string;
   duration: string;
   technologies: string[];
+  /** Icon name or image URL (no file storage for uploads). */
+  icon?: string | undefined;
   isActive: boolean;
   order: number;
 }
@@ -174,4 +194,14 @@ export interface NewsletterSubscription {
   email: string;
   subscribedAt: string;
   isActive: boolean;
+}
+
+/** NXA_CallbackRequests row. `status` is the stored RequestStatus (allowed values not confirmed). */
+export interface CallbackRequest {
+  id: string;
+  name: string;
+  phone: string;
+  preferredTimeSlot?: string | undefined;
+  status?: string | undefined;
+  requestedAt: string;
 }

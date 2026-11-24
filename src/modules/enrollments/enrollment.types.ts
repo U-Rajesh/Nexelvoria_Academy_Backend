@@ -49,6 +49,19 @@ export interface Enrollment {
   isAuthorizedFreeAccess?: boolean;
   overrideReason?: string;
   overrideApprovedBy?: EntityId;
+
+  /**
+   * The amount payable for this enrollment (NXA_Enrollments.FinalAmount),
+   * after any discount applied when it was created. Payment orders charge
+   * this, not the course list price.
+   */
+  amountDueINR?: number;
+
+  /**
+   * Discount already applied when the enrollment was created
+   * (NXA_Enrollments.DiscountAmount). A coupon may not stack on it.
+   */
+  discountAmountINR?: number;
 }
 
 /** Filters for the admin enrolment list. */
@@ -67,4 +80,10 @@ export interface CreateEnrollmentInput {
   batchId?: EntityId;
   enrollmentType: EnrollmentType;
   status: EnrollmentStatus;
+  /**
+   * D6: refuse (BatchFullError) when the batch already holds its
+   * NXA_Batches.Capacity. Checked under a lock in the insert transaction, so
+   * concurrent requests cannot exceed it. NULL capacity = no limit.
+   */
+  enforceBatchCapacity?: boolean;
 }

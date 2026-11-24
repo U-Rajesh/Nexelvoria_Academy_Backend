@@ -49,6 +49,7 @@ describe("Batch 5: Public CMS & Communication Endpoints Integration", () => {
     studentToken = await makeToken("student-1", "student");
 
     const authenticate = createAuthenticate({
+      studentAccess: null,
       sessions: () => harness.sessions,
     });
 

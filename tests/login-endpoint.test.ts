@@ -220,11 +220,15 @@ describe("POST /api/v1/auth/login (development-only)", () => {
     if (options.withProfile !== false) {
       await h.students.createForUser(user.id, PROFILE);
 
-      if (options.verified === true) {
+      // An "active" student in the old model was verified and approved; under
+      // CL-001 that is what lets a student sign in, so it is the default here.
+      const usable = options.status === "active";
+
+      if (options.verified ?? usable) {
         await h.students.markVerified(user.id, "email");
       }
 
-      if (options.approved === true) {
+      if (options.approved ?? usable) {
         await h.students.recordApprovalDecision(user.id, {
           status: "approved",
           decidedByUserId: "admin-1",
@@ -297,7 +301,7 @@ describe("POST /api/v1/auth/login (development-only)", () => {
       );
     });
 
-    it("403 ACCOUNT_PENDING_APPROVAL, with NO ticket", async () => {
+    it("200 for a verified student awaiting approval - limited access (CL-001 decision 1)", async () => {
       await seedStudent({
         email: "await@test.local",
         mobile: "9000000011",
@@ -306,15 +310,38 @@ describe("POST /api/v1/auth/login (development-only)", () => {
 
       const res = await login("await@test.local");
 
-      assert.equal(res.status, 403);
-
+      assert.equal(res.status, 200);
       const body = await json(res);
-      assert.equal(body["error"], "ACCOUNT_PENDING_APPROVAL");
-      assert.equal(
-        body["verificationTicket"],
-        undefined,
-        "there is nothing to verify, so no ticket may be issued",
-      );
+      assert.equal(body["verificationTicket"], undefined, "nothing to verify, so no ticket");
+    });
+
+    it("403 ACCOUNT_PENDING for a rejected registration", async () => {
+      const id = await seedStudent({ email: "rejected@test.local", mobile: "9000000017", verified: true });
+      await h.students.recordApprovalDecision(id, {
+        status: "rejected",
+        decidedByUserId: "admin-1",
+        decidedAt: new Date().toISOString(),
+      });
+
+      const res = await login("rejected@test.local");
+
+      assert.equal(res.status, 403);
+      assert.equal((await json(res))["error"], "ACCOUNT_PENDING");
+    });
+
+    it("403 ACCOUNT_SUSPENDED for an approved student who is suspended", async () => {
+      await seedStudent({
+        email: "approvedsusp@test.local",
+        mobile: "9000000018",
+        status: "suspended",
+        verified: true,
+        approved: true,
+      });
+
+      const res = await login("approvedsusp@test.local");
+
+      assert.equal(res.status, 403);
+      assert.equal((await json(res))["error"], "ACCOUNT_SUSPENDED");
     });
 
     it("403 ACCOUNT_SUSPENDED", async () => {
@@ -356,12 +383,7 @@ describe("POST /api/v1/auth/login (development-only)", () => {
       assert.equal((await json(res))["error"], "ACCOUNT_LOCKED");
     });
 
-    it("403 ACCOUNT_PENDING for an APPROVED but not-yet-activated account", async () => {
-      // Found by the end-to-end run: this used to report
-      // ACCOUNT_PENDING_APPROVAL, telling an already-approved student to
-      // wait for an approval that had happened. What they wait on is
-      // activation, which is a separate admin action with no code of its
-      // own - so the generic code is the honest answer.
+    it("200 for an APPROVED student with no separate activation (CL-001 decision 2)", async () => {
       await seedStudent({
         email: "approvednotactive@test.local",
         mobile: "9000000016",
@@ -371,14 +393,7 @@ describe("POST /api/v1/auth/login (development-only)", () => {
 
       const res = await login("approvednotactive@test.local");
 
-      assert.equal(res.status, 403);
-
-      const body = await json(res);
-      assert.equal(body["error"], "ACCOUNT_PENDING");
-      assert.ok(
-        !/wait for an administrator to approve/i.test(String(body["message"])),
-        "it must not tell an approved student to wait for approval",
-      );
+      assert.equal(res.status, 200);
     });
 
     it("403 ACCOUNT_PENDING (generic) when the reason cannot be established", async () => {
@@ -495,9 +510,10 @@ describe("POST /api/v1/auth/login (development-only)", () => {
       assert.equal(data["isEmailVerified"], true);
       assert.equal(data["accountState"], "pending_approval");
 
-      // 4. Signing in again now reports the APPROVAL gate instead.
+      // 4. Signing in again now succeeds with LIMITED access while approval
+      //    is pending (CL-001 decision 1).
       const again = await login("resume@test.local");
-      assert.equal((await json(again))["error"], "ACCOUNT_PENDING_APPROVAL");
+      assert.equal(again.status, 200);
     });
 
     it("a ticket for one student cannot verify another", async () => {

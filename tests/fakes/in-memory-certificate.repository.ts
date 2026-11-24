@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import type { CertificateRepository } from "../../src/modules/certificates/certificate.repository";
+import { CertificateRuleError, type CertificateRepository } from "../../src/modules/certificates/certificate.repository";
+import { RecordNotFoundError } from "../../src/repositories/repository.errors";
 import type { CertificateRecord } from "../../src/modules/certificates/certificate.types";
 
 export class InMemoryCertificateRepository implements CertificateRepository {
@@ -48,8 +49,12 @@ export class InMemoryCertificateRepository implements CertificateRepository {
   }
 
   async revokeCertificate(id: string, reason: string, _revokedByUserId: string): Promise<CertificateRecord> {
+    // Mirrors the SQL adapter's errors.
     const cert = this.certificates.find((c) => c.id === id);
-    if (!cert) throw new Error("Certificate not found.");
+    if (!cert) throw new RecordNotFoundError("certificate", id);
+    if (cert.certificateStatus === "revoked") {
+      throw new CertificateRuleError("CERTIFICATE_ALREADY_REVOKED", "This certificate has already been revoked.", 409);
+    }
     cert.certificateStatus = "revoked";
     cert.revokedAt = new Date().toISOString();
     cert.revocationReason = reason;

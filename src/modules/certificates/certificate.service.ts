@@ -1,48 +1,39 @@
-import crypto from "node:crypto";
-import type { CertificateRepository } from "./certificate.repository";
+import { CertificateRuleError, type CertificateRepository } from "./certificate.repository";
+import { RecordNotFoundError } from "../../repositories/repository.errors";
 import type {
   CertificateEligibility,
   CertificateRecord,
   CertificateVerificationResult,
+  PublicCertificateView,
 } from "./certificate.types";
 import { ApiError } from "../../utils/api-error";
+
+/** BR-011 eligibility cannot be decided yet (Q8 + verified data sources). */
+const certificateEligibilityBlocked = (): ApiError =>
+  ApiError.serviceUnavailable(
+    "Certificate eligibility cannot be determined yet: passing marks (open question Q8) and verified attendance " +
+      "and completion data are not available. Certificates cannot be issued until they are.",
+    "CERTIFICATE_ELIGIBILITY_UNAVAILABLE",
+  );
 
 export class CertificateService {
   constructor(private readonly certificateRepo: CertificateRepository) {}
 
+  /**
+   * BR-011 certificate eligibility (attendance >= 75%, completion, passing
+   * marks) is BLOCKED: course-specific passing marks are undecided (open
+   * question Q8) and no verified attendance/completion data source is wired.
+   * The previous version answered "eligible" from built-in defaults (85%
+   * attendance, completed, passed). No rule is invented; the check is refused.
+   */
   async checkEligibility(
     _studentUserId: string,
     _courseId: string,
-    opts?: { attendancePercentage?: number; courseCompletionVerified?: boolean; passingMarksVerified?: boolean }
   ): Promise<CertificateEligibility> {
-    const attendance = opts?.attendancePercentage ?? 85;
-    const completion = opts?.courseCompletionVerified ?? true;
-    const passing = opts?.passingMarksVerified ?? true;
-
-    const reasons: string[] = [];
-    const minAttendance = 75;
-
-    if (attendance < minAttendance) {
-      reasons.push(`Attendance is ${attendance}%, which is below the required ${minAttendance}%.`);
-    }
-    if (!completion) {
-      reasons.push("Course completion has not been fully verified.");
-    }
-    if (!passing) {
-      reasons.push("Passing marks requirement has not been met.");
-    }
-
-    return {
-      isEligible: reasons.length === 0,
-      attendancePercentage: attendance,
-      minAttendanceRequired: minAttendance,
-      passingMarksVerified: passing,
-      courseCompletionVerified: completion,
-      reasons,
-    };
+    throw certificateEligibilityBlocked();
   }
 
-  async issueCertificate(data: {
+  async issueCertificate(_data: {
     studentUserId: string;
     studentNameAtIssue: string;
     courseId: string;
@@ -53,33 +44,10 @@ export class CertificateService {
     courseCompletionVerified?: boolean | undefined;
     issuedByUserId: string;
   }): Promise<CertificateRecord> {
-    const attendance = data.attendancePercentage ?? 85;
-    const passing = data.passingMarksVerified ?? true;
-    const completion = data.courseCompletionVerified ?? true;
-
-    if (attendance < 75 || !passing || !completion) {
-      throw ApiError.badRequest("Student does not satisfy the academic requirements for certification.");
-    }
-
-    const randomSuffix = crypto.randomBytes(4).toString("hex").toUpperCase();
-    const certificateNumber = `NXA-2026-${randomSuffix}`;
-    const verificationToken = crypto.randomUUID();
-
-    return this.certificateRepo.issueCertificate({
-      studentUserId: data.studentUserId,
-      studentNameAtIssue: data.studentNameAtIssue,
-      courseId: data.courseId,
-      courseNameAtIssue: data.courseNameAtIssue,
-      enrollmentId: data.enrollmentId,
-      certificateNumber,
-      verificationToken,
-      attendancePercentage: attendance,
-      passingMarksVerified: passing,
-      courseCompletionVerified: completion,
-      certificateStatus: "valid",
-      issuedByUserId: data.issuedByUserId,
-      pdfUrl: `/api/v1/certificates/download/${certificateNumber}`,
-    });
+    // Issuing depends on BR-011 eligibility, which is blocked (see
+    // checkEligibility). Client-supplied or defaulted figures are not
+    // accepted as proof of eligibility.
+    throw certificateEligibilityBlocked();
   }
 
   async verifyCertificate(codeOrToken: string, requestIp: string): Promise<CertificateVerificationResult> {
@@ -103,10 +71,21 @@ export class CertificateService {
       requestIp
     );
 
+    const view: PublicCertificateView = {
+      certificateNumber: cert.certificateNumber,
+      studentNameAtIssue: cert.studentNameAtIssue,
+      courseNameAtIssue: cert.courseNameAtIssue,
+      attendancePercentage: cert.attendancePercentage,
+      certificateStatus: cert.certificateStatus,
+      issuedAt: cert.issuedAt,
+      ...(cert.revokedAt ? { revokedAt: cert.revokedAt } : {}),
+      ...(cert.revocationReason ? { revocationReason: cert.revocationReason } : {}),
+    };
+
     if (cert.certificateStatus === "revoked") {
       return {
         isValid: false,
-        certificate: cert,
+        certificate: view,
         message: `Certificate has been revoked: ${cert.revocationReason ?? "Administrative action"}.`,
         verificationDate: now,
       };
@@ -114,7 +93,7 @@ export class CertificateService {
 
     return {
       isValid: true,
-      certificate: cert,
+      certificate: view,
       message: "Certificate is authentic and valid.",
       verificationDate: now,
     };
@@ -128,12 +107,17 @@ export class CertificateService {
     return this.certificateRepo.getAllCertificates();
   }
 
+  /**
+   * CER-008. The repository checks existence and state under a lock and
+   * writes status, history and audit atomically; its errors map to 404 / 409.
+   */
   async revokeCertificate(id: string, reason: string, adminUserId: string): Promise<CertificateRecord> {
-    const existing = await this.certificateRepo.getCertificateById(id);
-    if (!existing) {
-      throw ApiError.notFound("Certificate not found.");
+    try {
+      return await this.certificateRepo.revokeCertificate(id, reason, adminUserId);
+    } catch (err) {
+      if (err instanceof RecordNotFoundError) throw ApiError.notFound("Certificate not found.");
+      if (err instanceof CertificateRuleError) throw new ApiError(err.status, err.message, err.code);
+      throw err;
     }
-
-    return this.certificateRepo.revokeCertificate(id, reason, adminUserId);
   }
 }

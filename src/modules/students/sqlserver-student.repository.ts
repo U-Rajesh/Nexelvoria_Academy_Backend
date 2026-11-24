@@ -8,7 +8,8 @@ import {
 } from "../../repositories/repository.errors";
 import { getSqlServerPool } from "../../db/sqlserver.pool";
 import { deriveAccountState } from "./account-state";
-import type { StudentRepository } from "./student.repository";
+import { writeAuditLog } from "../admin/sqlserver-admin.repository";
+import type { StudentAudit, StudentRepository } from "./student.repository";
 import {
   DEFAULT_STUDENT_SORT,
   type AdminApprovalStatus,
@@ -174,13 +175,25 @@ const BASE_STUDENT_QUERY = `
     p.ApprovedAt,
     p.RejectionReason,
     (
+      -- Approved decision: derived from ACTIVE and COMPLETED enrollments only.
+      -- Display data; it must never be used for authorization.
       SELECT STRING_AGG(CAST(e.CourseId AS VARCHAR(50)), ',')
       FROM dbo.NXA_Enrollments e
       WHERE e.StudentUserId = u.UserId
+        AND UPPER(e.EnrollmentStatus) IN ('ACTIVE', 'COMPLETED')
     ) AS EnrolledCourseIds
   FROM dbo.NXA_Users u
   INNER JOIN dbo.NXA_StudentProfiles p ON p.UserId = u.UserId
 `;
+
+/**
+ * Writes a student-management audit row on the change's own transaction (SEC
+ * audit logs), so the change and its audit commit or roll back together.
+ */
+const writeStudentAudit = async (tx: sql.Transaction, audit: StudentAudit | undefined, studentId: string): Promise<void> => {
+  if (!audit) return;
+  await writeAuditLog(tx.request(), { ...audit, moduleCode: "STUDENT_MGMT", entityName: "Student", entityId: studentId });
+};
 
 export class SqlServerStudentRepository implements StudentRepository {
   constructor(
@@ -277,7 +290,9 @@ export class SqlServerStudentRepository implements StudentRepository {
 
     if (filter.approvalStatus) {
       req.input("approvalStatus", sql.VarChar(20), filter.approvalStatus);
-      conditions.push("p.ApprovalStatus = @approvalStatus");
+      // Stored values are upper case (e.g. 'PENDING'); the API filter is lower
+      // case. Compare case-insensitively rather than relying on DB collation.
+      conditions.push("UPPER(p.ApprovalStatus) = UPPER(@approvalStatus)");
     }
 
     if (filter.passingYear) {
@@ -609,21 +624,40 @@ export class SqlServerStudentRepository implements StudentRepository {
     }
   }
 
-  async setStatus(id: EntityId, status: AdminSettableStudentStatus): Promise<Student> {
+  async setStatus(id: EntityId, status: AdminSettableStudentStatus, audit?: StudentAudit): Promise<Student> {
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("id", sql.BigInt, id);
-    req.input("status", sql.VarChar(20), status);
+    const tx = pool.transaction();
+    await tx.begin();
+    try {
+      const req = tx.request();
+      req.input("id", sql.BigInt, id);
+      req.input("status", sql.VarChar(20), status);
 
-    const result = await req.query(`
-      UPDATE dbo.NXA_Users
-      SET AccountStatus = @status,
-          UpdatedAt = SYSUTCDATETIME()
-      WHERE UserId = @id AND DeletedAt IS NULL
-    `);
+      // Only a real change updates the row; the same status is not audited.
+      const result = await req.query(`
+        UPDATE dbo.NXA_Users
+        SET AccountStatus = @status,
+            UpdatedAt = SYSUTCDATETIME()
+        WHERE UserId = @id AND DeletedAt IS NULL AND LOWER(ISNULL(AccountStatus, '')) <> LOWER(@status)
+      `);
 
-    if (result.rowsAffected[0] === 0) {
-      throw new RecordNotFoundError("student", id);
+      if ((result.rowsAffected[0] ?? 0) === 0) {
+        const exists = await tx
+          .request()
+          .input("id", sql.BigInt, id)
+          .query(`SELECT UserId FROM dbo.NXA_Users WHERE UserId = @id AND DeletedAt IS NULL`);
+        if (exists.recordset.length === 0) throw new RecordNotFoundError("student", id);
+      } else {
+        await writeStudentAudit(tx, audit, String(id));
+      }
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // ignore
+      }
+      throw err;
     }
 
     const updated = await this.findById(id);
@@ -633,26 +667,39 @@ export class SqlServerStudentRepository implements StudentRepository {
     return updated;
   }
 
-  async recordApprovalDecision(id: EntityId, decision: ApprovalDecision): Promise<Student> {
+  async recordApprovalDecision(id: EntityId, decision: ApprovalDecision, audit?: StudentAudit): Promise<Student> {
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("id", sql.BigInt, id);
-    req.input("status", sql.VarChar(20), decision.status);
-    req.input("decidedBy", sql.BigInt, decision.decidedByUserId);
-    req.input("remarks", sql.NVarChar(500), decision.remarks ?? null);
+    const tx = pool.transaction();
+    await tx.begin();
+    try {
+      const req = tx.request();
+      req.input("id", sql.BigInt, id);
+      req.input("status", sql.VarChar(20), decision.status);
+      req.input("decidedBy", sql.BigInt, decision.decidedByUserId);
+      req.input("remarks", sql.NVarChar(500), decision.remarks ?? null);
 
-    const result = await req.query(`
-      UPDATE dbo.NXA_StudentProfiles
-      SET ApprovalStatus = @status,
-          ApprovedByUserId = @decidedBy,
-          ApprovedAt = SYSUTCDATETIME(),
-          RejectionReason = @remarks,
-          UpdatedAt = SYSUTCDATETIME()
-      WHERE UserId = @id
-    `);
+      const result = await req.query(`
+        UPDATE dbo.NXA_StudentProfiles
+        SET ApprovalStatus = @status,
+            ApprovedByUserId = @decidedBy,
+            ApprovedAt = SYSUTCDATETIME(),
+            RejectionReason = @remarks,
+            UpdatedAt = SYSUTCDATETIME()
+        WHERE UserId = @id
+      `);
 
-    if (result.rowsAffected[0] === 0) {
-      throw new RecordNotFoundError("student", id);
+      if ((result.rowsAffected[0] ?? 0) === 0) {
+        throw new RecordNotFoundError("student", id);
+      }
+      await writeStudentAudit(tx, audit, String(id));
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // ignore
+      }
+      throw err;
     }
 
     const updated = await this.findById(id);

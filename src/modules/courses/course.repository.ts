@@ -1,4 +1,5 @@
 import type { PaginatedResult, PaginationQuery } from "../../contracts/api.contract";
+import type { TransactionalAuditEntry } from "../../contracts/audit.contract";
 import type { EntityId, Slug } from "../../contracts/identifier.contract";
 import type {
   Course,
@@ -9,6 +10,16 @@ import type {
   CreateCourseInput,
   UpdateCourseInput,
 } from "./course.types";
+import type { PrerequisiteCourse } from "./course-prerequisites";
+
+/**
+ * A course-management audit entry (COURSE_MGMT / Course, entity id = course
+ * id), written by the repository in the same transaction as the change. Not
+ * written for a no-op.
+ */
+export type CourseAudit = TransactionalAuditEntry;
+/** An audit entry whose text depends on what the transaction stored. */
+export type CourseAuditFor<T> = (stored: T) => CourseAudit;
 
 /**
  * The `courses` repository PORT. Interface only - no SQL, no driver.
@@ -46,11 +57,18 @@ export interface CourseRepository {
     sort?: CourseSort,
   ): Promise<PaginatedResult<Course>>;
 
-  /** Creates a course. Throws DuplicateRecordError on slug conflict. */
-  create(input: CreateCourseInput): Promise<Course>;
+  /**
+   * Creates a course. Throws DuplicateRecordError on slug conflict. The audit
+   * entry (built from the stored course code) is written in the same
+   * transaction as the insert.
+   */
+  create(input: CreateCourseInput, audit?: CourseAuditFor<{ courseCode: string }>): Promise<Course>;
 
-  /** Patches metadata. Throws RecordNotFoundError when absent. */
-  update(id: EntityId, input: UpdateCourseInput): Promise<Course>;
+  /**
+   * Patches metadata. Throws RecordNotFoundError when absent. A patch that
+   * changes nothing writes nothing and is not audited.
+   */
+  update(id: EntityId, input: UpdateCourseInput, audit?: CourseAudit): Promise<Course>;
 
   /**
    * Replaces the whole curriculum tree.
@@ -61,7 +79,7 @@ export interface CourseRepository {
    * concurrency is added, so the signature is kept deliberately simple
    * now and will gain a version token when that decision is made.
    */
-  replaceCurriculum(id: EntityId, modules: CourseModule[]): Promise<Course>;
+  replaceCurriculum(id: EntityId, modules: CourseModule[], audit?: CourseAudit): Promise<Course>;
 
   /**
    * Sets `status` AND `isPublished` together, in ONE write.
@@ -78,6 +96,7 @@ export interface CourseRepository {
   setPublication(
     id: EntityId,
     change: { status: CourseStatus; isPublished: boolean },
+    audit?: CourseAudit,
   ): Promise<Course>;
 
   /**
@@ -109,4 +128,22 @@ export interface CourseRepository {
     courseId: EntityId,
     lessonId: EntityId,
   ): Promise<{ lesson: CourseModule["chapters"][number]["lessons"][number] } | null>;
+
+  /**
+   * Prerequisite courses of a course (NXA_CoursePrerequisites).
+   * Throws RecordNotFoundError when the course is absent.
+   */
+  findPrerequisites(courseId: EntityId): Promise<PrerequisiteCourse[]>;
+
+  /**
+   * Replaces the course's prerequisite set in one transaction. Throws
+   * RecordNotFoundError for an unknown course and PrerequisiteRuleError for a
+   * self-dependency, an unknown prerequisite course or a circular chain. An
+   * unchanged set writes nothing (`changed: false`).
+   */
+  replacePrerequisites(
+    courseId: EntityId,
+    prerequisiteCourseIds: string[],
+    audit?: CourseAuditFor<PrerequisiteCourse[]>,
+  ): Promise<{ prerequisites: PrerequisiteCourse[]; changed: boolean }>;
 }

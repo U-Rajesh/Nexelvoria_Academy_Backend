@@ -2,7 +2,8 @@ import type { PaginatedResult, PaginationQuery } from "../../src/contracts/api.c
 import type { EntityId } from "../../src/contracts/identifier.contract";
 import type { UserStatus } from "../../src/contracts/user.contract";
 import type { EnrollmentRepository } from "../../src/modules/enrollments/enrollment.repository";
-import type { StudentRepository } from "../../src/modules/students/student.repository";
+import type { AuditEntry } from "../../src/contracts/audit.contract";
+import type { StudentAudit, StudentRepository } from "../../src/modules/students/student.repository";
 import {
   DEFAULT_STUDENT_SORT,
   type ApprovalDecision,
@@ -100,6 +101,22 @@ export class InMemoryStudentRepository implements StudentRepository {
   /** Clears all data. Call between tests for isolation. */
   reset(): void {
     this.store.reset();
+    this.failAudit = false;
+  }
+
+  /**
+   * Where audit entries go (the harness points it at the admin fake's audit
+   * log, as NXA_AuditLogs). Written BEFORE the change is applied, so a failed
+   * audit leaves nothing changed - like the SQL transaction.
+   */
+  auditSink?: (entry: AuditEntry) => Promise<unknown>;
+  /** Test hook: the student audit write fails. */
+  failAudit = false;
+
+  private async audit(entry: StudentAudit | undefined, studentId: string): Promise<void> {
+    if (!entry) return;
+    if (this.failAudit) throw new Error("audit write failed");
+    await this.auditSink?.({ ...entry, moduleCode: "STUDENT_MGMT", entityName: "Student", entityId: studentId });
   }
 
   /** Inserts a fully formed student, bypassing create() validation. */
@@ -433,8 +450,11 @@ export class InMemoryStudentRepository implements StudentRepository {
    * "active" student unable to sign in. Admin activation and login now read
    * and write the same field.
    */
-  async setStatus(id: EntityId, status: UserStatus): Promise<Student> {
+  async setStatus(id: EntityId, status: UserStatus, audit?: StudentAudit): Promise<Student> {
     const existing = this.store.getOrThrow(id);
+    // Unchanged status: no write, no audit (mirrors the SQL adapter).
+    if (existing.status === status) return this.hydrate(existing);
+    await this.audit(audit, id);
 
     if (this.users !== undefined && (await this.users.findById(id)) !== null) {
       await this.users.setStatus(id, status);
@@ -443,8 +463,9 @@ export class InMemoryStudentRepository implements StudentRepository {
     return this.hydrate(this.store.set({ ...existing, status }));
   }
 
-  async recordApprovalDecision(id: EntityId, decision: ApprovalDecision): Promise<Student> {
+  async recordApprovalDecision(id: EntityId, decision: ApprovalDecision, audit?: StudentAudit): Promise<Student> {
     const existing = this.store.getOrThrow(id);
+    await this.audit(audit, id);
 
     return this.hydrate(this.store.set({
       ...existing,

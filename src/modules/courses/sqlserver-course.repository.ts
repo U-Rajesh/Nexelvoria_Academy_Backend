@@ -5,13 +5,22 @@ import type { EntityId, Slug } from "../../contracts/identifier.contract";
 import {
   DuplicateRecordError,
   RecordNotFoundError,
+  RecordInUseError,
+  UnsupportedFieldsError,
 } from "../../repositories/repository.errors";
 import { getSqlServerPool } from "../../db/sqlserver.pool";
-import type { CourseRepository } from "./course.repository";
+import { writeAuditLog } from "../admin/sqlserver-admin.repository";
+import type { CourseAudit, CourseAuditFor, CourseRepository } from "./course.repository";
+import {
+  PrerequisiteRuleError,
+  assertNoCycle,
+  assertNotSelf,
+  planPrerequisiteChange,
+  type PrerequisiteCourse,
+} from "./course-prerequisites";
 import {
   type Chapter,
   type Course,
-  type CourseCategory,
   type CourseFilter,
   type CourseLevel,
   type CourseModule,
@@ -21,7 +30,93 @@ import {
   type Lesson,
   type LessonType,
   type UpdateCourseInput,
+  UNPERSISTED_COURSE_FIELDS,
 } from "./course.types";
+
+/**
+ * Writes a course-management audit row on the change's own transaction (SEC
+ * audit logs), so the change and its audit commit or roll back together.
+ */
+const writeCourseAudit = async (tx: sql.Transaction, audit: CourseAudit | undefined, courseId: string): Promise<void> => {
+  if (!audit) return;
+  await writeAuditLog(tx.request(), { ...audit, moduleCode: "COURSE_MGMT", entityName: "Course", entityId: courseId });
+};
+
+/**
+ * True when saving `next` would write exactly what is stored: same module,
+ * chapter and lesson ids in the same order, and the same value for every
+ * field the curriculum save writes. Anything uncertain (an item without an id,
+ * a value the read path cannot show) counts as a change, so a real change is
+ * never skipped.
+ */
+const sameCurriculum = (stored: CourseModule[], next: CourseModule[]): boolean => {
+  const text = (v: string | null | undefined) => v ?? "";
+  const at = (v: string | undefined) => (v ? new Date(v).getTime() : null);
+  const sameId = (a: unknown, b: unknown) => a !== undefined && a !== null && a !== "" && String(a) === String(b);
+  if (stored.length !== next.length) return false;
+  return next.every((m, i) => {
+    const sm = stored[i]!;
+    if (!sameId(m.id, sm.id) || m.title !== sm.title || text(m.description) !== text(sm.description)) return false;
+    const nc = m.chapters ?? [];
+    const sc = sm.chapters ?? [];
+    if (nc.length !== sc.length) return false;
+    return nc.every((c, j) => {
+      const so = sc[j]!;
+      if (!sameId(c.id, so.id) || c.title !== so.title || text(c.description) !== text(so.description)) return false;
+      const nl = c.lessons ?? [];
+      const sl = so.lessons ?? [];
+      if (nl.length !== sl.length) return false;
+      return nl.every((l, k) => {
+        const o = sl[k]!;
+        return (
+          sameId(l.id, o.id) &&
+          l.title === o.title &&
+          (l.lessonType ?? "reading") === (o.lessonType ?? "reading") &&
+          (l.durationMinutes ?? 0) === (o.durationMinutes ?? 0) &&
+          (l.videoUrl || null) === (o.videoUrl || null) &&
+          (l.studyMaterialText ?? null) === (o.studyMaterialText ?? null) &&
+          !!l.isFreePreview === !!o.isFreePreview &&
+          (l.isDownloadRestricted === undefined || l.isDownloadRestricted === o.isDownloadRestricted) &&
+          !!l.isSequentialUnlock === !!o.isSequentialUnlock &&
+          at(l.publishAt) === at(o.publishAt)
+        );
+      });
+    });
+  });
+};
+
+/** SQL Server error number from an mssql error, if any. */
+const sqlErrorNumber = (err: unknown): number | undefined => {
+  const e = err as { number?: number; originalError?: { number?: number; info?: { number?: number } } } | null;
+  return e?.number ?? e?.originalError?.number ?? e?.originalError?.info?.number;
+};
+
+/**
+ * NXA_Lessons stores one external URL (ExternalUrl, used for the video link)
+ * and the study text (ContentText). PDFs and extra links belong in
+ * NXA_LearningMaterials, whose MaterialType values are not yet established,
+ * so non-empty values for those are refused rather than silently dropped.
+ */
+const rejectUnpersistedLessonFields = (modules: CourseModule[]): void => {
+  const fields = new Set<string>();
+  for (const m of modules) {
+    for (const c of m.chapters ?? []) {
+      for (const l of c.lessons ?? []) {
+        if (l.pdfUrl) fields.add("lessons.pdfUrl");
+        if (l.externalLinks && l.externalLinks.length > 0) fields.add("lessons.externalLinks");
+      }
+    }
+  }
+  if (fields.size > 0) throw new UnsupportedFieldsError("lesson", [...fields]);
+};
+
+/** Refuses fields NXA_Courses cannot store, rather than dropping them silently. */
+const rejectUnpersistedFields = (input: object): void => {
+  const present = UNPERSISTED_COURSE_FIELDS.filter(
+    (f) => (input as Record<string, unknown>)[f] !== undefined,
+  );
+  if (present.length > 0) throw new UnsupportedFieldsError("course", present);
+};
 
 interface CourseRow {
   CourseId: number | bigint | string;
@@ -55,9 +150,13 @@ interface CurriculumRow {
   LessonType: string | null;
   DurationMinutes: number | null;
   ExternalUrl: string | null;
+  ContentText: string | null;
   IsPreview: boolean | number | null;
   IsDownloadAllowed: boolean | number | null;
   LessonSequence: number | null;
+  IsSequentialUnlock?: boolean | number | null;
+  PublishAt?: Date | string | null;
+  LessonStatus?: string | null;
 }
 
 const mapRowToCourse = (row: CourseRow, modules: CourseModule[] = []): Course => {
@@ -94,12 +193,9 @@ const mapRowToCourse = (row: CourseRow, modules: CourseModule[] = []): Course =>
     title: row.CourseName,
     shortDescription: row.ShortDescription ?? "",
     longDescription: row.Description ?? "",
-    thumbnailUrl: `/images/courses/${slug}.png`,
     durationWeeks,
-    totalHours: durationWeeks * 10,
     feeINR: Math.round(Number(row.ListPrice ?? 0)),
     level,
-    category: "Software Development" as CourseCategory,
     technologies: [],
     modules,
     isPublished,
@@ -148,8 +244,12 @@ export class SqlServerCourseRepository implements CourseRepository {
         l.LessonType,
         l.DurationMinutes,
         l.ExternalUrl,
+        l.ContentText,
         l.IsPreview,
         l.IsDownloadAllowed,
+        l.IsSequentialUnlock,
+        l.PublishAt,
+        l.Status AS LessonStatus,
         l.SequenceNumber AS LessonSequence
       FROM dbo.NXA_CourseModules m
       LEFT JOIN dbo.NXA_Chapters c ON c.ModuleId = m.ModuleId
@@ -206,8 +306,12 @@ export class SqlServerCourseRepository implements CourseRepository {
             durationMinutes: r.DurationMinutes ?? 10,
             lessonType,
             ...(r.ExternalUrl ? { videoUrl: r.ExternalUrl } : {}),
+            ...(r.ContentText ? { studyMaterialText: r.ContentText } : {}),
             isFreePreview: Boolean(r.IsPreview),
             isDownloadRestricted: !Boolean(r.IsDownloadAllowed),
+            ...(r.IsSequentialUnlock ? { isSequentialUnlock: true } : {}),
+            ...(r.PublishAt ? { publishAt: new Date(r.PublishAt).toISOString() } : {}),
+            ...(r.LessonStatus ? { isPublished: String(r.LessonStatus).toUpperCase() === "PUBLISHED" } : {}),
             order: r.LessonSequence ?? 0,
           };
           chapterMap.get(chapId)!.lessons.push(lesson);
@@ -349,90 +453,150 @@ export class SqlServerCourseRepository implements CourseRepository {
     };
   }
 
-  async create(input: CreateCourseInput): Promise<Course> {
+  async create(input: CreateCourseInput, audit?: CourseAuditFor<{ courseCode: string }>): Promise<Course> {
+    rejectUnpersistedFields(input);
     const pool = await this.getPool();
-    const req = pool.request();
     const code = (input.courseCode ?? input.slug).trim().toUpperCase();
-    req.input("code", sql.VarChar(40), code);
-    req.input("name", sql.NVarChar(200), input.title.trim());
-    req.input("level", sql.VarChar(30), input.level ?? "Beginner");
-    req.input("shortDesc", sql.NVarChar(1000), input.shortDescription ?? "");
-    req.input("desc", sql.NVarChar(sql.MAX), input.longDescription ?? "");
-    req.input("price", sql.Decimal(12, 2), input.feeINR ?? 0);
-    req.input("durationVal", sql.Int, input.durationWeeks ?? 12);
-    req.input("status", sql.VarChar(20), "DRAFT");
-
+    const duplicate = (err: unknown): unknown => {
+      const sqlNum = sqlErrorNumber(err);
+      return sqlNum === 2601 || sqlNum === 2627 ? new DuplicateRecordError("course", "courseCode", code) : err;
+    };
+    const tx = pool.transaction();
     try {
-      const result = await req.query<{ CourseId: number | bigint }>(`
-        INSERT INTO dbo.NXA_Courses (
-          CourseCode,
-          CourseName,
-          CourseLevel,
-          ShortDescription,
-          Description,
-          ListPrice,
-          DurationValue,
-          DurationUnit,
-          Status,
-          CreatedAt
-        )
-        OUTPUT inserted.CourseId
-        VALUES (
-          @code,
-          @name,
-          @level,
-          @shortDesc,
-          @desc,
-          @price,
-          @durationVal,
-          'WEEKS',
-          @status,
-          SYSUTCDATETIME()
-        )
-      `);
-
-      const id = String(result.recordset[0]?.CourseId);
-      const created = await this.findById(id);
-      if (!created) {
-        throw new Error("Failed to reload created course");
-      }
-      return created;
-    } catch (err: unknown) {
-      if (err instanceof Error && "number" in err) {
-        const sqlNum = (err as { number: number }).number;
-        if (sqlNum === 2601 || sqlNum === 2627) {
-          throw new DuplicateRecordError("course", "courseCode", code);
-        }
-      }
-      throw err;
+      await tx.begin();
+    } catch (err) {
+      throw duplicate(err);
     }
+    let id = "";
+    try {
+      const req = tx.request();
+      req.input("code", sql.VarChar(40), code);
+      req.input("name", sql.NVarChar(200), input.title.trim());
+      req.input("level", sql.VarChar(30), input.level ?? "Beginner");
+      req.input("shortDesc", sql.NVarChar(1000), input.shortDescription ?? "");
+      req.input("desc", sql.NVarChar(sql.MAX), input.longDescription ?? "");
+      req.input("price", sql.Decimal(12, 2), input.feeINR ?? 0);
+      req.input("durationVal", sql.Int, input.durationWeeks ?? 12);
+      req.input("status", sql.VarChar(20), "DRAFT");
+
+      try {
+        const result = await req.query<{ CourseId: number | bigint }>(`
+          INSERT INTO dbo.NXA_Courses (
+            CourseCode,
+            CourseName,
+            CourseLevel,
+            ShortDescription,
+            Description,
+            ListPrice,
+            DurationValue,
+            DurationUnit,
+            Status,
+            CreatedAt
+          )
+          OUTPUT inserted.CourseId
+          VALUES (
+            @code,
+            @name,
+            @level,
+            @shortDesc,
+            @desc,
+            @price,
+            @durationVal,
+            'WEEKS',
+            @status,
+            SYSUTCDATETIME()
+          )
+        `);
+        id = String(result.recordset[0]?.CourseId);
+      } catch (err: unknown) {
+        throw duplicate(err);
+      }
+
+      await writeCourseAudit(tx, audit?.({ courseCode: code }), id);
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // already rolled back
+      }
+      throw duplicate(err);
+    }
+
+    const created = await this.findById(id);
+    if (!created) {
+      throw new Error("Failed to reload created course");
+    }
+    return created;
   }
 
-  async update(id: EntityId, input: UpdateCourseInput): Promise<Course> {
+  async update(id: EntityId, input: UpdateCourseInput, audit?: CourseAudit): Promise<Course> {
+    rejectUnpersistedFields(input);
+    if (input.courseCode !== undefined) {
+      // CourseCode is also the public slug; changing it would break links.
+      throw new UnsupportedFieldsError("course", ["courseCode"]);
+    }
     const pool = await this.getPool();
     const existing = await this.findById(id);
     if (!existing) {
       throw new RecordNotFoundError("course", id);
     }
 
-    const req = pool.request();
-    req.input("id", sql.BigInt, id);
-    req.input("name", sql.NVarChar(200), input.title ?? existing.title);
-    req.input("shortDesc", sql.NVarChar(1000), input.shortDescription ?? existing.shortDescription);
-    req.input("desc", sql.NVarChar(sql.MAX), input.longDescription ?? existing.longDescription);
-    req.input("price", sql.Decimal(12, 2), input.feeINR ?? existing.feeINR);
-    req.input("level", sql.VarChar(30), input.level ?? existing.level);
+    const next = {
+      title: input.title ?? existing.title,
+      shortDescription: input.shortDescription ?? existing.shortDescription,
+      longDescription: input.longDescription ?? existing.longDescription,
+      feeINR: input.feeINR ?? existing.feeINR,
+      level: input.level ?? existing.level,
+      durationWeeks: input.durationWeeks ?? existing.durationWeeks,
+    };
+    // A patch that changes no stored column writes nothing and is not audited.
+    if (
+      next.title === existing.title &&
+      next.shortDescription === existing.shortDescription &&
+      next.longDescription === existing.longDescription &&
+      Number(next.feeINR) === Number(existing.feeINR) &&
+      next.level === existing.level &&
+      Number(next.durationWeeks) === Number(existing.durationWeeks)
+    ) {
+      return existing;
+    }
 
-    await req.query(`
-      UPDATE dbo.NXA_Courses
-      SET CourseName = @name,
-          ShortDescription = @shortDesc,
-          Description = @desc,
-          ListPrice = @price,
-          CourseLevel = @level,
-          UpdatedAt = SYSUTCDATETIME()
-      WHERE CourseId = @id
-    `);
+    const tx = pool.transaction();
+    await tx.begin();
+    try {
+      const req = tx.request();
+      req.input("id", sql.BigInt, id);
+      req.input("name", sql.NVarChar(200), next.title);
+      req.input("shortDesc", sql.NVarChar(1000), next.shortDescription);
+      req.input("desc", sql.NVarChar(sql.MAX), next.longDescription);
+      req.input("price", sql.Decimal(12, 2), next.feeINR);
+      req.input("level", sql.VarChar(30), next.level);
+      req.input("durationVal", sql.Int, next.durationWeeks);
+
+      const result = await req.query(`
+        UPDATE dbo.NXA_Courses
+        SET CourseName = @name,
+            ShortDescription = @shortDesc,
+            Description = @desc,
+            ListPrice = @price,
+            CourseLevel = @level,
+            DurationValue = @durationVal,
+            DurationUnit = 'WEEKS',
+            UpdatedAt = SYSUTCDATETIME()
+        WHERE CourseId = @id AND DeletedAt IS NULL
+      `);
+      if ((result.rowsAffected[0] ?? 0) === 0) throw new RecordNotFoundError("course", id);
+      await writeCourseAudit(tx, audit, String(id));
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // already rolled back
+      }
+      throw err;
+    }
 
     const updated = await this.findById(id);
     if (!updated) {
@@ -441,118 +605,309 @@ export class SqlServerCourseRepository implements CourseRepository {
     return updated;
   }
 
-  async replaceCurriculum(id: EntityId, modules: CourseModule[]): Promise<Course> {
+  /**
+   * Saves the curriculum tree WITHOUT regenerating ids.
+   *
+   * Items whose id already belongs to this course are updated in place (so
+   * lesson ids referenced by progress, doubts, bookmarks and materials stay
+   * valid); items without such an id are inserted; stored items missing from
+   * the tree are deleted. All in one transaction. A delete blocked by a
+   * foreign key (e.g. a lesson with student progress) rolls everything back
+   * and surfaces as RecordInUseError.
+   *
+   * Live-schema rules:
+   *  - NXA_CourseModules is unique on (CourseVersionId, SequenceNumber) with no
+   *    filter, so modules must belong to a course version (NULL versions would
+   *    collide across courses). Approved decision: modules are attached to the
+   *    course's current version (IsCurrent = 1); a course with no version gets
+   *    VersionNumber 1 (IsCurrent = 1) created in the same transaction.
+   *  - Modules, chapters and lessons are unique on their parent + SequenceNumber,
+   *    so stored rows are first parked on unique negative sequence numbers and
+   *    then given their final 1..n order: a reorder cannot collide midway.
+   *  - Lesson study text is NXA_Lessons.ContentText.
+   */
+  async replaceCurriculum(id: EntityId, modules: CourseModule[], audit?: CourseAudit): Promise<Course> {
+    rejectUnpersistedLessonFields(modules);
+    if (!/^\d{1,19}$/.test(String(id))) throw new RecordNotFoundError("course", id);
     const pool = await this.getPool();
     const existing = await this.findById(id);
     if (!existing) {
       throw new RecordNotFoundError("course", id);
+    }
+    // Saving the stored tree again (including lesson unlock / publish-date
+    // settings) changes nothing: no write and no audit entry.
+    if (sameCurriculum(existing.modules, modules)) {
+      return existing;
     }
 
     const tx = pool.transaction();
     await tx.begin();
 
     try {
-      // 1. Delete existing lessons, chapters, modules for this course
-      const delReq = tx.request();
-      delReq.input("courseId", sql.BigInt, id);
-      await delReq.query(`
-        DELETE l FROM dbo.NXA_Lessons l
-        INNER JOIN dbo.NXA_Chapters c ON c.ChapterId = l.ChapterId
-        INNER JOIN dbo.NXA_CourseModules m ON m.ModuleId = c.ModuleId
-        WHERE m.CourseId = @courseId;
-
-        DELETE c FROM dbo.NXA_Chapters c
-        INNER JOIN dbo.NXA_CourseModules m ON m.ModuleId = c.ModuleId
-        WHERE m.CourseId = @courseId;
-
-        DELETE FROM dbo.NXA_CourseModules WHERE CourseId = @courseId;
+      // 1. The course version the modules belong to.
+      const vReq = tx.request();
+      vReq.input("courseId", sql.BigInt, id);
+      const versions = await vReq.query<{ CourseVersionId: number | bigint; IsCurrent: boolean | number }>(`
+        SELECT CourseVersionId, IsCurrent
+        FROM dbo.NXA_CourseVersions WITH (UPDLOCK, HOLDLOCK)
+        WHERE CourseId = @courseId
       `);
+      const current = versions.recordset.filter((v) => Boolean(v.IsCurrent));
+      if (current.length > 1) {
+        throw new RecordInUseError("curriculum", "the course has more than one current version; resolve that before saving the curriculum");
+      }
+      if (current.length === 0 && versions.recordset.length > 0) {
+        throw new RecordInUseError("curriculum", "the course has versions but none is marked current; resolve that before saving the curriculum");
+      }
+      let versionId: string;
+      if (current[0]) {
+        versionId = String(current[0].CourseVersionId);
+      } else {
+        const nv = tx.request();
+        nv.input("courseId", sql.BigInt, id);
+        const created = await nv.query<{ CourseVersionId: number | bigint }>(`
+          INSERT INTO dbo.NXA_CourseVersions (CourseId, VersionNumber, IsCurrent, CreatedAt)
+          OUTPUT inserted.CourseVersionId
+          VALUES (@courseId, 1, 1, SYSUTCDATETIME())
+        `);
+        versionId = String(created.recordset[0]?.CourseVersionId);
+      }
 
-      // 2. Insert new modules, chapters, lessons
+      // 2. What is stored for this course (locked).
+      const idsReq = tx.request();
+      idsReq.input("courseId", sql.BigInt, id);
+      const stored = await idsReq.query<{ ModuleId: number | bigint; ChapterId: number | bigint | null; LessonId: number | bigint | null }>(`
+        SELECT m.ModuleId, c.ChapterId, l.LessonId
+        FROM dbo.NXA_CourseModules m WITH (UPDLOCK, HOLDLOCK)
+        LEFT JOIN dbo.NXA_Chapters c ON c.ModuleId = m.ModuleId
+        LEFT JOIN dbo.NXA_Lessons l ON l.ChapterId = c.ChapterId
+        WHERE m.CourseId = @courseId
+      `);
+      const storedModules = new Set<string>();
+      const storedChapters = new Set<string>();
+      const storedLessons = new Set<string>();
+      for (const r of stored.recordset) {
+        storedModules.add(String(r.ModuleId));
+        if (r.ChapterId !== null) storedChapters.add(String(r.ChapterId));
+        if (r.LessonId !== null) storedLessons.add(String(r.LessonId));
+      }
+
+      // 3. Park stored rows on unique negative sequence numbers (and move
+      //    modules onto the current version) so the final ordering cannot
+      //    collide with a not-yet-updated sibling.
+      if (storedModules.size > 0) {
+        const park = tx.request();
+        park.input("courseId", sql.BigInt, id);
+        park.input("versionId", sql.BigInt, versionId);
+        await park.query(`
+          WITH l AS (
+            SELECT les.SequenceNumber, ROW_NUMBER() OVER (ORDER BY les.LessonId) AS rn
+            FROM dbo.NXA_Lessons les
+            JOIN dbo.NXA_Chapters ch ON ch.ChapterId = les.ChapterId
+            JOIN dbo.NXA_CourseModules mo ON mo.ModuleId = ch.ModuleId
+            WHERE mo.CourseId = @courseId
+          )
+          UPDATE l SET SequenceNumber = -rn;
+
+          WITH c AS (
+            SELECT ch.SequenceNumber, ROW_NUMBER() OVER (ORDER BY ch.ChapterId) AS rn
+            FROM dbo.NXA_Chapters ch
+            JOIN dbo.NXA_CourseModules mo ON mo.ModuleId = ch.ModuleId
+            WHERE mo.CourseId = @courseId
+          )
+          UPDATE c SET SequenceNumber = -rn;
+
+          WITH m AS (
+            SELECT mo.SequenceNumber, mo.CourseVersionId, ROW_NUMBER() OVER (ORDER BY mo.ModuleId) AS rn
+            FROM dbo.NXA_CourseModules mo
+            WHERE mo.CourseId = @courseId
+          )
+          UPDATE m SET SequenceNumber = -rn, CourseVersionId = @versionId;
+        `);
+      }
+
+      const keptModules = new Set<string>();
+      const keptChapters = new Set<string>();
+      const keptLessons = new Set<string>();
+
+      // 4. Write the tree in order.
       let modSeq = 1;
       for (const m of modules) {
-        const modReq = tx.request();
-        modReq.input("courseId", sql.BigInt, id);
-        modReq.input("title", sql.NVarChar(200), m.title);
-        modReq.input("desc", sql.NVarChar(1000), m.description ?? "");
-        modReq.input("seq", sql.Int, modSeq++);
-
-        const modRes = await modReq.query<{ ModuleId: number | bigint }>(`
-          INSERT INTO dbo.NXA_CourseModules (CourseId, ModuleTitle, ModuleDescription, SequenceNumber, IsPublished, CreatedAt)
-          OUTPUT inserted.ModuleId
-          VALUES (@courseId, @title, @desc, @seq, 1, SYSUTCDATETIME())
-        `);
-        const modId = modRes.recordset[0]?.ModuleId;
+        const mReq = tx.request();
+        mReq.input("courseId", sql.BigInt, id);
+        mReq.input("versionId", sql.BigInt, versionId);
+        mReq.input("title", sql.NVarChar(200), m.title);
+        mReq.input("desc", sql.NVarChar(1000), m.description ?? "");
+        mReq.input("seq", sql.Int, modSeq++);
+        let moduleId: string;
+        if (storedModules.has(String(m.id))) {
+          moduleId = String(m.id);
+          mReq.input("id", sql.BigInt, moduleId);
+          await mReq.query(`
+            UPDATE dbo.NXA_CourseModules
+            SET ModuleTitle = @title, ModuleDescription = @desc, SequenceNumber = @seq, CourseVersionId = @versionId
+            WHERE ModuleId = @id AND CourseId = @courseId
+          `);
+        } else {
+          const r = await mReq.query<{ ModuleId: number | bigint }>(`
+            INSERT INTO dbo.NXA_CourseModules (CourseId, CourseVersionId, ModuleTitle, ModuleDescription, SequenceNumber, IsPublished, CreatedAt)
+            OUTPUT inserted.ModuleId
+            VALUES (@courseId, @versionId, @title, @desc, @seq, 1, SYSUTCDATETIME())
+          `);
+          moduleId = String(r.recordset[0]?.ModuleId);
+        }
+        keptModules.add(moduleId);
 
         let chapSeq = 1;
         for (const c of m.chapters ?? []) {
-          const chapReq = tx.request();
-          chapReq.input("moduleId", sql.BigInt, modId);
-          chapReq.input("title", sql.NVarChar(200), c.title);
-          chapReq.input("desc", sql.NVarChar(1000), c.description ?? "");
-          chapReq.input("seq", sql.Int, chapSeq++);
-
-          const chapRes = await chapReq.query<{ ChapterId: number | bigint }>(`
-            INSERT INTO dbo.NXA_Chapters (ModuleId, ChapterTitle, Description, SequenceNumber, CreatedAt)
-            OUTPUT inserted.ChapterId
-            VALUES (@moduleId, @title, @desc, @seq, SYSUTCDATETIME())
-          `);
-          const chapId = chapRes.recordset[0]?.ChapterId;
+          const cReq = tx.request();
+          cReq.input("moduleId", sql.BigInt, moduleId);
+          cReq.input("title", sql.NVarChar(200), c.title);
+          cReq.input("desc", sql.NVarChar(1000), c.description ?? "");
+          cReq.input("seq", sql.Int, chapSeq++);
+          let chapterId: string;
+          if (storedChapters.has(String(c.id))) {
+            chapterId = String(c.id);
+            cReq.input("id", sql.BigInt, chapterId);
+            // A chapter may move between modules of the same course.
+            await cReq.query(`
+              UPDATE dbo.NXA_Chapters
+              SET ModuleId = @moduleId, ChapterTitle = @title, Description = @desc, SequenceNumber = @seq
+              WHERE ChapterId = @id
+            `);
+          } else {
+            const r = await cReq.query<{ ChapterId: number | bigint }>(`
+              INSERT INTO dbo.NXA_Chapters (ModuleId, ChapterTitle, Description, SequenceNumber, CreatedAt)
+              OUTPUT inserted.ChapterId
+              VALUES (@moduleId, @title, @desc, @seq, SYSUTCDATETIME())
+            `);
+            chapterId = String(r.recordset[0]?.ChapterId);
+          }
+          keptChapters.add(chapterId);
 
           let lesSeq = 1;
           for (const l of c.lessons ?? []) {
-            const lesReq = tx.request();
-            lesReq.input("chapterId", sql.BigInt, chapId);
-            lesReq.input("title", sql.NVarChar(200), l.title);
-            lesReq.input("type", sql.VarChar(30), l.lessonType ?? "reading");
-            lesReq.input("dur", sql.Int, l.durationMinutes ?? 10);
-            lesReq.input("preview", sql.Bit, l.isFreePreview ? 1 : 0);
-            lesReq.input("seq", sql.Int, lesSeq++);
-
-            await lesReq.query(`
-              INSERT INTO dbo.NXA_Lessons (ChapterId, LessonTitle, LessonType, DurationMinutes, IsPreview, IsDownloadAllowed, IsSequentialUnlock, SequenceNumber, Status, CreatedAt)
-              VALUES (@chapterId, @title, @type, @dur, @preview, 0, 0, @seq, 'PUBLISHED', SYSUTCDATETIME())
-            `);
+            const lReq = tx.request();
+            lReq.input("chapterId", sql.BigInt, chapterId);
+            lReq.input("title", sql.NVarChar(200), l.title);
+            lReq.input("type", sql.VarChar(30), l.lessonType ?? "reading");
+            lReq.input("dur", sql.Int, l.durationMinutes ?? 0);
+            lReq.input("url", sql.NVarChar(1000), l.videoUrl ? l.videoUrl : null);
+            lReq.input("content", sql.NVarChar(sql.MAX), l.studyMaterialText ?? null);
+            lReq.input("preview", sql.Bit, l.isFreePreview ? 1 : 0);
+            lReq.input("seq", sql.Int, lesSeq++);
+            // LMS-006: download permission; unspecified keeps the stored value.
+            lReq.input("download", sql.Bit, l.isDownloadRestricted === undefined ? null : l.isDownloadRestricted ? 0 : 1);
+            // LMS-004 / LMS-005: sequential unlock and scheduled availability.
+            lReq.input("sequential", sql.Bit, l.isSequentialUnlock ? 1 : 0);
+            lReq.input("publishAt", sql.DateTime2, l.publishAt ? new Date(l.publishAt) : null);
+            if (storedLessons.has(String(l.id))) {
+              keptLessons.add(String(l.id));
+              lReq.input("id", sql.BigInt, String(l.id));
+              await lReq.query(`
+                UPDATE dbo.NXA_Lessons
+                SET ChapterId = @chapterId, LessonTitle = @title, LessonType = @type, DurationMinutes = @dur,
+                    ExternalUrl = @url, ContentText = @content, IsPreview = @preview, SequenceNumber = @seq,
+                    IsDownloadAllowed = COALESCE(@download, IsDownloadAllowed), IsSequentialUnlock = @sequential,
+                    PublishAt = @publishAt, UpdatedAt = SYSUTCDATETIME()
+                WHERE LessonId = @id
+              `);
+            } else {
+              await lReq.query(`
+                INSERT INTO dbo.NXA_Lessons (
+                  ChapterId, LessonTitle, LessonType, DurationMinutes, ExternalUrl, ContentText, IsPreview,
+                  IsDownloadAllowed, IsSequentialUnlock, PublishAt, SequenceNumber, Status, CreatedAt
+                )
+                VALUES (
+                  @chapterId, @title, @type, @dur, @url, @content, @preview,
+                  COALESCE(@download, 0), @sequential, @publishAt, @seq, 'PUBLISHED', SYSUTCDATETIME()
+                )
+              `);
+            }
           }
         }
       }
 
-      await tx.commit();
-      const updated = await this.findById(id);
-      if (!updated) {
-        throw new RecordNotFoundError("course", id);
+      // 5. Remove what the tree no longer contains, children first.
+      const drop = async (table: string, column: string, ids: string[]) => {
+        for (const did of ids) {
+          const dReq = tx.request();
+          dReq.input("id", sql.BigInt, did);
+          await dReq.query(`DELETE FROM dbo.${table} WHERE ${column} = @id`);
+        }
+      };
+      try {
+        await drop("NXA_Lessons", "LessonId", [...storedLessons].filter((x) => !keptLessons.has(x)));
+        await drop("NXA_Chapters", "ChapterId", [...storedChapters].filter((x) => !keptChapters.has(x)));
+        await drop("NXA_CourseModules", "ModuleId", [...storedModules].filter((x) => !keptModules.has(x)));
+      } catch (err) {
+        if (sqlErrorNumber(err) === 547) {
+          throw new RecordInUseError(
+            "curriculum",
+            "a removed module, chapter or lesson still has student activity or materials linked to it",
+          );
+        }
+        throw err;
       }
-      return updated;
+
+      await writeCourseAudit(tx, audit, String(id));
+      await tx.commit();
     } catch (err) {
       try {
         await tx.rollback();
       } catch {
-        // ignore
+        // already rolled back
       }
       throw err;
     }
+
+    const updated = await this.findById(id);
+    if (!updated) {
+      throw new RecordNotFoundError("course", id);
+    }
+    return updated;
   }
 
   async setPublication(
     id: EntityId,
     change: { status: CourseStatus; isPublished: boolean },
+    audit?: CourseAudit,
   ): Promise<Course> {
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("id", sql.BigInt, id);
-    req.input("status", sql.VarChar(20), change.status.toUpperCase());
-    req.input("preview", sql.Bit, change.isPublished ? 1 : 0);
+    const tx = pool.transaction();
+    await tx.begin();
+    try {
+      const req = tx.request();
+      req.input("id", sql.BigInt, id);
+      req.input("status", sql.VarChar(20), change.status.toUpperCase());
 
-    const result = await req.query(`
-      UPDATE dbo.NXA_Courses
-      SET Status = @status,
-          IsPreviewEnabled = @preview,
-          UpdatedAt = SYSUTCDATETIME()
-      WHERE CourseId = @id AND DeletedAt IS NULL
-    `);
+      // Publication is carried by Status. IsPreviewEnabled is the separate
+      // "free preview before payment" switch (CRS-009) and is not touched here.
+      // Only a real change updates the row; the same status is not audited.
+      const result = await req.query(`
+        UPDATE dbo.NXA_Courses
+        SET Status = @status,
+            UpdatedAt = SYSUTCDATETIME()
+        WHERE CourseId = @id AND DeletedAt IS NULL AND UPPER(ISNULL(Status, '')) <> @status
+      `);
 
-    if (result.rowsAffected[0] === 0) {
-      throw new RecordNotFoundError("course", id);
+      if ((result.rowsAffected[0] ?? 0) === 0) {
+        const exists = await tx
+          .request()
+          .input("id", sql.BigInt, id)
+          .query(`SELECT CourseId FROM dbo.NXA_Courses WHERE CourseId = @id AND DeletedAt IS NULL`);
+        if (exists.recordset.length === 0) throw new RecordNotFoundError("course", id);
+      } else {
+        await writeCourseAudit(tx, audit, String(id));
+      }
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // already rolled back
+      }
+      throw err;
     }
 
     const updated = await this.findById(id);
@@ -592,5 +947,121 @@ export class SqlServerCourseRepository implements CourseRepository {
       }
     }
     return null;
+  }
+  // --- Prerequisites (NXA_CoursePrerequisites) -------------------------------
+
+  private async readPrerequisites(
+    request: sql.Request,
+    courseId: string,
+  ): Promise<PrerequisiteCourse[]> {
+    request.input("pCourseId", sql.BigInt, courseId);
+    const rows = await request.query<{ CourseId: number | bigint; CourseCode: string; CourseName: string }>(`
+      SELECT c.CourseId, c.CourseCode, c.CourseName
+      FROM dbo.NXA_CoursePrerequisites p
+      JOIN dbo.NXA_Courses c ON c.CourseId = p.PrerequisiteCourseId
+      WHERE p.CourseId = @pCourseId
+      ORDER BY c.CourseName ASC, c.CourseId ASC
+    `);
+    return rows.recordset.map((r) => ({ courseId: String(r.CourseId), courseCode: r.CourseCode, title: r.CourseName }));
+  }
+
+  async findPrerequisites(courseId: EntityId): Promise<PrerequisiteCourse[]> {
+    if (!/^\d{1,19}$/.test(String(courseId))) throw new RecordNotFoundError("course", courseId);
+    const pool = await this.getPool();
+    const exists = await pool
+      .request()
+      .input("id", sql.BigInt, courseId)
+      .query(`SELECT CourseId FROM dbo.NXA_Courses WHERE CourseId = @id AND DeletedAt IS NULL`);
+    if (exists.recordset.length === 0) throw new RecordNotFoundError("course", courseId);
+    return this.readPrerequisites(pool.request(), String(courseId));
+  }
+
+  /**
+   * Replaces the prerequisite set in one transaction: validates the course,
+   * every prerequisite course (exists, not deleted, not the course itself)
+   * and that no circular chain results; then removes dropped links and adds
+   * new ones. An unchanged set writes nothing.
+   */
+  async replacePrerequisites(
+    courseId: EntityId,
+    prerequisiteCourseIds: string[],
+    audit?: CourseAuditFor<PrerequisiteCourse[]>,
+  ): Promise<{ prerequisites: PrerequisiteCourse[]; changed: boolean }> {
+    const id = String(courseId);
+    if (!/^\d{1,19}$/.test(id)) throw new RecordNotFoundError("course", id);
+    const wanted = [...new Set(prerequisiteCourseIds.map(String))];
+    assertNotSelf(id, wanted);
+    const nonNumeric = wanted.filter((p) => !/^\d{1,19}$/.test(p));
+    if (nonNumeric.length > 0) {
+      throw new PrerequisiteRuleError("UNKNOWN_PREREQUISITE_COURSE", "Some prerequisite courses do not exist.", nonNumeric);
+    }
+
+    const pool = await this.getPool();
+    const tx = pool.transaction();
+    await tx.begin();
+    let changed = false;
+    try {
+      const cReq = tx.request();
+      cReq.input("id", sql.BigInt, id);
+      const course = await cReq.query(`SELECT CourseId FROM dbo.NXA_Courses WHERE CourseId = @id AND DeletedAt IS NULL`);
+      if (course.recordset.length === 0) throw new RecordNotFoundError("course", id);
+
+      if (wanted.length > 0) {
+        const eReq = tx.request();
+        const names = wanted.map((p, i) => {
+          eReq.input(`p${i}`, sql.BigInt, p);
+          return `@p${i}`;
+        });
+        const found = await eReq.query<{ CourseId: number | bigint }>(
+          `SELECT CourseId FROM dbo.NXA_Courses WHERE DeletedAt IS NULL AND CourseId IN (${names.join(", ")})`,
+        );
+        const foundIds = new Set(found.recordset.map((r) => String(r.CourseId)));
+        const missing = wanted.filter((p) => !foundIds.has(p));
+        if (missing.length > 0) {
+          throw new PrerequisiteRuleError("UNKNOWN_PREREQUISITE_COURSE", "Some prerequisite courses do not exist.", missing);
+        }
+      }
+
+      // All stored links, locked, for the cycle check and the diff.
+      const all = await tx.request().query<{ CourseId: number | bigint; PrerequisiteCourseId: number | bigint }>(`
+        SELECT CourseId, PrerequisiteCourseId FROM dbo.NXA_CoursePrerequisites WITH (UPDLOCK, HOLDLOCK)
+      `);
+      const edges = all.recordset.map((r) => [String(r.CourseId), String(r.PrerequisiteCourseId)] as const);
+      assertNoCycle(id, wanted, edges);
+
+      const current = edges.filter(([c]) => c === id).map(([, p]) => p);
+      const { toAdd, toRemove } = planPrerequisiteChange(current, wanted);
+      changed = toAdd.length > 0 || toRemove.length > 0;
+
+      for (const p of toRemove) {
+        const d = tx.request();
+        d.input("courseId", sql.BigInt, id);
+        d.input("prereqId", sql.BigInt, p);
+        await d.query(`DELETE FROM dbo.NXA_CoursePrerequisites WHERE CourseId = @courseId AND PrerequisiteCourseId = @prereqId`);
+      }
+      for (const p of toAdd) {
+        const a = tx.request();
+        a.input("courseId", sql.BigInt, id);
+        a.input("prereqId", sql.BigInt, p);
+        await a.query(`INSERT INTO dbo.NXA_CoursePrerequisites (CourseId, PrerequisiteCourseId) VALUES (@courseId, @prereqId)`);
+      }
+
+      // Audited only when the set changed, in the same transaction, with the
+      // saved set as this transaction sees it.
+      if (changed && audit) {
+        await writeCourseAudit(tx, audit(await this.readPrerequisites(tx.request(), id)), id);
+      }
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // already rolled back
+      }
+      throw err;
+    }
+
+    const pool2 = await this.getPool();
+    return { prerequisites: await this.readPrerequisites(pool2.request(), id), changed };
   }
 }

@@ -242,6 +242,39 @@ export const needsRehash = (storedHash: unknown): boolean => {
 };
 
 /**
+ * Generates a one-time temporary password for an account created or reset by
+ * an administrator.
+ *
+ * Built from a CSPRNG and guaranteed to satisfy `passwordPolicySchema` (one
+ * character from each required class, 16 characters total), so `hashPassword`
+ * never rejects it. The plaintext is returned to the caller exactly once and
+ * must never be logged or persisted - only its argon2id hash is stored.
+ */
+export const generateTemporaryPassword = (length = 16): string => {
+  const classes = [
+    "ABCDEFGHJKLMNPQRSTUVWXYZ",
+    "abcdefghijkmnopqrstuvwxyz",
+    "23456789",
+    "!@#$%^&*-_+=?",
+  ];
+  const all = classes.join("");
+  const pick = (set: string): string => set[randomBytes(1)[0]! % set.length]!;
+
+  const chars = classes.map(pick);
+  while (chars.length < Math.max(length, classes.length)) {
+    chars.push(pick(all));
+  }
+
+  // Fisher-Yates shuffle so the class-guaranteed characters are not positional.
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const j = randomBytes(1)[0]! % (i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+
+  return chars.join("");
+};
+
+/**
  * Lazily built hash of a random throwaway value.
  *
  * Not a credential and not an account: the plaintext is 32 random bytes that

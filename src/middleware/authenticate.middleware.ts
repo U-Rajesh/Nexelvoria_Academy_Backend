@@ -6,6 +6,11 @@ import {
   type AccessTokenRejection,
   verifyAccessToken,
 } from "../modules/auth/token.service";
+import type {
+  StudentAccessDecision,
+  StudentAccessResolver,
+  StudentAccessTier,
+} from "../modules/students/student-access";
 import { ApiError } from "../utils/api-error";
 import { logger } from "../utils/logger";
 
@@ -78,6 +83,13 @@ export const extractBearerToken = (header: string | undefined): string | null =>
  */
 export interface AuthenticateDeps {
   sessions: () => SessionRepository;
+  /**
+   * Resolves a student's access tier on every request (CL-001). REQUIRED
+   * so that no wiring can silently omit it: pass `null` only where no
+   * student records exist (some isolated tests), in which case student
+   * principals carry no tier and are treated as before.
+   */
+  studentAccess: StudentAccessResolver | null;
 }
 
 /**
@@ -240,12 +252,40 @@ export const createAuthenticate = (deps: AuthenticateDeps): RequestHandler => {
         return;
       }
 
-      // --- 7. identity ---------------------------------------------------
+      // --- 7. student access tier (CL-001) -------------------------------
+      // Read fresh on every request, so approval, rejection, suspension or
+      // deactivation take effect immediately rather than at token expiry.
+      let studentAccess: StudentAccessTier | undefined;
+      if (claims.role === "student" && deps.studentAccess !== null) {
+        let decision: StudentAccessDecision;
+        try {
+          decision = await deps.studentAccess(claims.sub);
+        } catch (err) {
+          logger.error("authentication unavailable: student access lookup failed", {
+            ...context,
+            reason: err instanceof Error ? `${err.name}: ${err.message}` : "unknown",
+          });
+          next(ApiError.serviceUnavailable("Authentication is temporarily unavailable", "SERVICE_UNAVAILABLE"));
+          return;
+        }
+        if (!decision.allowed) {
+          logger.warn("authentication refused: student account may not be used", {
+            ...context,
+            reason: decision.reason,
+          });
+          next(ApiError.forbidden("This account cannot be used at the moment", "ACCOUNT_NOT_PERMITTED"));
+          return;
+        }
+        studentAccess = decision.tier;
+      }
+
+      // --- 8. identity ---------------------------------------------------
       // The single assignment of an identity in the whole codebase.
       req.principal = {
         id: claims.sub,
         role: claims.role,
         sessionId: claims.sid,
+        ...(studentAccess === undefined ? {} : { studentAccess }),
       };
 
       // Best effort, and deliberately not awaited for correctness: an

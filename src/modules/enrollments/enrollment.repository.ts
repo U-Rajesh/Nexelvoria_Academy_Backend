@@ -12,6 +12,17 @@ import type {
  *
  * Maps to docs/api-contracts.md section 9.
  */
+/** D6: the batch already holds its capacity (self-enrollment is refused). */
+export class BatchFullError extends Error {
+  constructor(
+    readonly batchId: string,
+    readonly capacity: number,
+  ) {
+    super(`Batch ${batchId} is full (capacity ${capacity}).`);
+    this.name = "BatchFullError";
+  }
+}
+
 export interface EnrollmentRepository {
   findById(id: EntityId): Promise<Enrollment | null>;
 
@@ -43,8 +54,17 @@ export interface EnrollmentRepository {
    */
   create(input: CreateEnrollmentInput): Promise<Enrollment>;
 
-  /** Moves the lifecycle state. Throws RecordNotFoundError when absent. */
-  setStatus(id: EntityId, status: EnrollmentStatus): Promise<Enrollment>;
+  /**
+   * Moves the lifecycle state and records NXA_EnrollmentStatusHistory in the
+   * same transaction (`history` supplies the actor, NULL for a system change,
+   * and the reason). A no-op (same status) writes nothing. Throws
+   * RecordNotFoundError when absent.
+   */
+  setStatus(
+    id: EntityId,
+    status: EnrollmentStatus,
+    history?: { changedByUserId: string | null; reason?: string | undefined },
+  ): Promise<Enrollment>;
 
   /**
    * Records a completed lesson and returns the updated enrolment.

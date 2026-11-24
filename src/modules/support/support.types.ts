@@ -1,9 +1,73 @@
+/** NXA_SupportTicketCategories (int identity, CategoryName, IsActive). */
+export interface SupportTicketCategory {
+  id: string;
+  name: string;
+}
+
+/** COM-010: one row of NXA_Messages between a student and a staff member. */
+export interface DirectMessage {
+  id: string;
+  senderUserId: string;
+  recipientUserId: string;
+  body: string;
+  sentAt: string;
+  readAt?: string | undefined;
+}
+
+/** A conversation as seen by the caller: the other participant and the latest message. */
+export interface ConversationSummary {
+  userId: string;
+  name: string;
+  lastMessage: string;
+  lastSentAt: string;
+  /** Messages from that participant the caller has not read yet. */
+  unreadCount: number;
+}
+
+export interface MessageContact {
+  userId: string;
+  name: string;
+}
+
+/** Admin view of a category (SUP-006): inactive ones included. */
+export interface SupportCategoryAdmin extends SupportTicketCategory {
+  isActive: boolean;
+}
+
+/** One row of NXA_SupportTicketStatusHistory (SUP-005). */
+export interface TicketStatusChange {
+  id: string;
+  previousStatus?: string | undefined;
+  newStatus: string;
+  changedByUserId?: string | undefined;
+  changedByName?: string | undefined;
+  changeReason?: string | undefined;
+  changedAt: string;
+}
+
+/** COM-008: notification history across recipients (Admin view). */
+export interface NotificationHistoryFilter {
+  recipientUserId?: string | undefined;
+  notificationType?: string | undefined;
+  /** Inclusive IST calendar dates (YYYY-MM-DD). */
+  from?: string | undefined;
+  to?: string | undefined;
+  search?: string | undefined;
+  page: number;
+  pageSize: number;
+}
+
+/** A broadcast audience is a set of role codes (NXA_Roles.RoleCode). */
+export type BroadcastAudience = Array<"student" | "teacher" | "admin" | "super_admin">;
+
 export interface SupportTicket {
   id: string;
   ticketNumber: string;
   studentUserId: string;
   studentName?: string | undefined;
+  /** NXA_SupportTicketCategories id (numeric). */
   categoryId: string;
+  categoryName?: string | undefined;
   subject: string;
   description: string;
   priority: 'low' | 'medium' | 'high' | 'urgent';
@@ -24,6 +88,12 @@ export interface TicketReply {
   attachmentObjectKey?: string | undefined;
   isInternal: boolean;
   repliedAt: string;
+}
+
+export interface NotificationHistoryRow extends Omit<InAppNotification, "notificationType" | "priority"> {
+  notificationType: string;
+  priority: string;
+  recipientName?: string | undefined;
 }
 
 export interface InAppNotification {

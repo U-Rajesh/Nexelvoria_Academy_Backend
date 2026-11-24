@@ -7,17 +7,25 @@ import { createAdminService, type AdminServiceDeps } from "./admin.service";
 import {
   adminStatusBodySchema,
   allocateTeacherBodySchema,
+  batchStatusBodySchema,
+  enrollmentStatusBodySchema,
   createAdminBodySchema,
   createBatchBodySchema,
   createEnrollmentAdminBodySchema,
   createRoleBodySchema,
+  createStudentAdminBodySchema,
   createTeacherAdminBodySchema,
+  updateTeacherAdminBodySchema,
+  teacherStatusBodySchema,
   financialOverrideDecisionBodySchema,
   instituteSettingsBodySchema,
+  maintenanceBodySchema,
   refundDecisionBodySchema,
+  testEmailBodySchema,
   updateAdminBodySchema,
   updateBatchBodySchema,
   updateRolePermissionsBodySchema,
+  placementRateQuerySchema,
 } from "./admin.validation";
 
 export interface AdminRoutesOptions extends AdminServiceDeps {
@@ -37,6 +45,7 @@ export const createAdminRoutes = (options: AdminRoutesOptions): Router => {
   // Dashboard stats
   router.get("/dashboard/stats", ...guards, controller.getDashboardStats);
   router.get("/stats", ...guards, controller.getDashboardStats);
+  router.get("/dashboard/placement-rate", ...guards, validate({ query: placementRateQuerySchema }), controller.getPlacementRate);
 
   // Batches
   router.get("/batches", ...guards, controller.getBatches);
@@ -53,7 +62,12 @@ export const createAdminRoutes = (options: AdminRoutesOptions): Router => {
     validate({ body: updateBatchBodySchema }),
     controller.updateBatch,
   );
-  router.patch("/batches/:batchId/status", ...guards, controller.setBatchStatus);
+  router.patch(
+    "/batches/:batchId/status",
+    ...guards,
+    validate({ body: batchStatusBodySchema }),
+    controller.setBatchStatus,
+  );
   router.post(
     "/batches/:batchId/allocate",
     ...guards,
@@ -86,7 +100,12 @@ export const createAdminRoutes = (options: AdminRoutesOptions): Router => {
     validate({ body: createEnrollmentAdminBodySchema }),
     controller.createEnrollment,
   );
-  router.patch("/enrollments/:enrollmentId/status", ...guards, controller.setEnrollmentStatus);
+  router.patch(
+    "/enrollments/:enrollmentId/status",
+    ...guards,
+    validate({ body: enrollmentStatusBodySchema }),
+    controller.setEnrollmentStatus,
+  );
 
   // Teachers management
   router.get("/teachers", ...guards, controller.getTeachers);
@@ -96,9 +115,30 @@ export const createAdminRoutes = (options: AdminRoutesOptions): Router => {
     validate({ body: createTeacherAdminBodySchema }),
     controller.createTeacher,
   );
+  router.put(
+    "/teachers/:teacherId",
+    ...guards,
+    validate({ body: updateTeacherAdminBodySchema }),
+    controller.updateTeacher,
+  );
+  router.patch(
+    "/teachers/:teacherId/status",
+    ...guards,
+    validate({ body: teacherStatusBodySchema }),
+    controller.setTeacherStatus,
+  );
+
+  // Student accounts (ADM-003). Listing, approval and status stay on /students.
+  router.post(
+    "/students",
+    ...guards,
+    validate({ body: createStudentAdminBodySchema }),
+    controller.createStudent,
+  );
 
   // Settings & Activity Logs
   router.get("/settings", ...guards, controller.getInstituteSettings);
+  router.get("/settings/catalog", ...guards, controller.getSettingsCatalog);
   router.put(
     "/settings",
     ...guards,
@@ -169,10 +209,18 @@ export const createSuperAdminRoutes = (options: AdminRoutesOptions): Router => {
   // System Configuration
   router.get("/config", ...guards, controller.getSystemConfig);
   router.get("/system-config", ...guards, controller.getSystemConfig);
+  // CFG-20: maintenance mode (Super Admin only; enforced by the maintenance guard).
+  router.get("/maintenance", ...guards, controller.getMaintenance);
+  router.put("/maintenance", ...guards, validate({ body: maintenanceBodySchema }), controller.setMaintenance);
   router.put("/config", ...guards, controller.saveSystemConfig);
   router.put("/system-config", ...guards, controller.saveSystemConfig);
-  router.post("/config/test-email", ...guards, controller.testEmailConfiguration);
-  router.post("/system-config/test-email", ...guards, controller.testEmailConfiguration);
+  router.post("/config/test-email", ...guards, validate({ body: testEmailBodySchema }), controller.testEmailConfiguration);
+  router.post(
+    "/system-config/test-email",
+    ...guards,
+    validate({ body: testEmailBodySchema }),
+    controller.testEmailConfiguration,
+  );
 
   // Audit Logs
   router.get("/audit-logs", ...guards, controller.getAuditLogs);
@@ -185,14 +233,20 @@ export const createSuperAdminRoutes = (options: AdminRoutesOptions): Router => {
     validate({ body: refundDecisionBodySchema }),
     controller.decideRefund,
   );
-  router.post("/refunds/:refundId/approve", ...guards, async (req, res) => {
-    req.body = { status: "approved", remarks: req.body?.remarks || "" };
-    return controller.decideRefund(req, res);
-  });
-  router.post("/refunds/:refundId/reject", ...guards, async (req, res) => {
-    req.body = { status: "rejected", remarks: req.body?.mandatoryReason || req.body?.remarks || "" };
-    return controller.decideRefund(req, res);
-  });
+  router.post(
+    "/refunds/:refundId/approve",
+    ...guards,
+    asDecision("approved"),
+    validate({ body: refundDecisionBodySchema }),
+    controller.decideRefund,
+  );
+  router.post(
+    "/refunds/:refundId/reject",
+    ...guards,
+    asDecision("rejected"),
+    validate({ body: refundDecisionBodySchema }),
+    controller.decideRefund,
+  );
 
   // Financial Overrides
   router.get("/financial-overrides", ...guards, controller.getFinancialOverrides);
@@ -202,14 +256,35 @@ export const createSuperAdminRoutes = (options: AdminRoutesOptions): Router => {
     validate({ body: financialOverrideDecisionBodySchema }),
     controller.decideFinancialOverride,
   );
-  router.post("/financial-overrides/:overrideId/approve", ...guards, async (req, res) => {
-    req.body = { status: "approved", remarks: req.body?.remarks || "" };
-    return controller.decideFinancialOverride(req, res);
-  });
-  router.post("/financial-overrides/:overrideId/reject", ...guards, async (req, res) => {
-    req.body = { status: "rejected", remarks: req.body?.mandatoryReason || req.body?.remarks || "" };
-    return controller.decideFinancialOverride(req, res);
-  });
+  router.post(
+    "/financial-overrides/:overrideId/approve",
+    ...guards,
+    asDecision("approved"),
+    validate({ body: financialOverrideDecisionBodySchema }),
+    controller.decideFinancialOverride,
+  );
+  router.post(
+    "/financial-overrides/:overrideId/reject",
+    ...guards,
+    asDecision("rejected"),
+    validate({ body: financialOverrideDecisionBodySchema }),
+    controller.decideFinancialOverride,
+  );
 
   return router;
 };
+
+/**
+ * Normalises the approve/reject alias bodies into the `{status, remarks}`
+ * decision shape so they go through the same validation as `/decide`
+ * (including the mandatory rejection reason). The UI sends the rejection
+ * reason as `mandatoryReason`.
+ */
+const asDecision =
+  (status: "approved" | "rejected"): RequestHandler =>
+  (req, _res, next) => {
+    const body = (req.body ?? {}) as { remarks?: unknown; mandatoryReason?: unknown };
+    const remarks = body.mandatoryReason ?? body.remarks;
+    req.body = remarks === undefined ? { status } : { status, remarks };
+    next();
+  };

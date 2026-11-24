@@ -5,10 +5,14 @@ import { resolveSortField } from "../../middleware/validate.middleware";
 import {
   DuplicateRecordError,
   RecordNotFoundError,
+  RecordInUseError,
+  UnsupportedFieldsError,
 } from "../../repositories/repository.errors";
 import { ApiError } from "../../utils/api-error";
+import { HttpStatus } from "../../utils/http-status";
 import { logger } from "../../utils/logger";
-import type { CourseRepository } from "./course.repository";
+import type { CourseAudit, CourseAuditFor, CourseRepository } from "./course.repository";
+import { PrerequisiteRuleError, type PrerequisiteCourse } from "./course-prerequisites";
 import {
   COURSE_SORT_FIELDS,
   PUBLIC_COURSE_STATUSES,
@@ -45,9 +49,42 @@ import {
  * a job or a CLI. See docs/architecture.md section 4.
  */
 
+/** D9: saved starting values for newly created lessons; undefined = never saved. */
+export interface NewLessonDefaults {
+  sequentialUnlock?: boolean | undefined;
+  downloadAllowed?: boolean | undefined;
+}
+
 export interface CourseServiceDeps {
   courses: CourseRepository;
+  /** Course settings (D9). Absent, or a value never saved: lessons are stored exactly as sent. */
+  newLessonDefaults?: () => Promise<NewLessonDefaults>;
 }
+
+/**
+ * D9: fills the unset unlock / download fields of lessons that do not exist in
+ * the stored course yet. Lessons that already exist are never touched, and a
+ * value the editor sent is never overridden.
+ */
+export const applyNewLessonDefaults = (
+  modules: CourseModule[],
+  storedLessonIds: ReadonlySet<string>,
+  defaults: NewLessonDefaults,
+): CourseModule[] =>
+  modules.map((m) => ({
+    ...m,
+    chapters: m.chapters.map((c) => ({
+      ...c,
+      lessons: c.lessons.map((l) => {
+        if (storedLessonIds.has(String(l.id))) return l;
+        return {
+          ...l,
+          ...(l.isSequentialUnlock === undefined && defaults.sequentialUnlock !== undefined ? { isSequentialUnlock: defaults.sequentialUnlock } : {}),
+          ...(l.isDownloadRestricted === undefined && defaults.downloadAllowed !== undefined ? { isDownloadRestricted: !defaults.downloadAllowed } : {}),
+        };
+      }),
+    })),
+  }));
 
 /**
  * Single public-visibility rule, used by every public read.
@@ -109,7 +146,8 @@ const toPublicLesson = (lesson: Lesson): PublicLesson => {
   // preview. `pdfUrl`, `studyMaterialText` and `externalLinks` are never
   // public until separately approved - `PublicLesson` omits them, so adding
   // one here would not compile.
-  if (!isFreePreview || lesson.videoUrl === undefined) {
+  const notYetAvailable = lesson.isPublished === false || (lesson.publishAt !== undefined && Date.parse(lesson.publishAt) > Date.now());
+  if (!isFreePreview || lesson.videoUrl === undefined || notYetAvailable) {
     return outline;
   }
 
@@ -190,6 +228,32 @@ const rethrowAsApiError = (err: unknown): never => {
     throw ApiError.conflict(`A course with this ${err.field} already exists`);
   }
 
+  if (err instanceof RecordInUseError) {
+    throw ApiError.conflict(
+      `The curriculum was not changed: ${err.detail}. Keep those items or remove the linked records first.`,
+      "CURRICULUM_IN_USE",
+    );
+  }
+
+  if (err instanceof PrerequisiteRuleError) {
+    throw new ApiError(
+      HttpStatus.UNPROCESSABLE_ENTITY,
+      err.message,
+      err.code,
+      [{ field: "prerequisiteCourseIds", message: `${err.message} (${err.courseIds.join(", ")})` }],
+    );
+  }
+
+  if (err instanceof UnsupportedFieldsError) {
+    throw ApiError.validation(
+      err.fields.map((field) => ({
+        field,
+        message: "This field cannot be saved yet: the course table has no column for it",
+      })),
+      "Some course fields cannot be saved",
+    );
+  }
+
   throw err;
 };
 
@@ -236,16 +300,18 @@ const toCreateCourseInput = (body: CreateCourseBody): CreateCourseInput => ({
   title: body.title,
   shortDescription: body.shortDescription,
   longDescription: body.longDescription,
-  thumbnailUrl: body.thumbnailUrl,
   durationWeeks: body.durationWeeks,
-  totalHours: body.totalHours,
   feeINR: body.feeINR,
   level: body.level,
-  category: body.category,
-  technologies: body.technologies,
-  hasPlacementGuarantee: body.hasPlacementGuarantee,
-  prerequisites: body.prerequisites,
-  learningOutcomes: body.learningOutcomes,
+  ...definedOnly({
+    thumbnailUrl: body.thumbnailUrl,
+    totalHours: body.totalHours,
+    category: body.category,
+    technologies: body.technologies,
+    hasPlacementGuarantee: body.hasPlacementGuarantee,
+    prerequisites: body.prerequisites,
+    learningOutcomes: body.learningOutcomes,
+  }),
   ...(body.courseCode === undefined ? {} : { courseCode: body.courseCode }),
   ...(body.discountedFeeINR === undefined ? {} : { discountedFeeINR: body.discountedFeeINR }),
   ...(body.eligibilityCriteria === undefined
@@ -338,6 +404,9 @@ const toCourseModules = (modules: CurriculumModuleBody[]): CourseModule[] =>
             externalLinks: lesson.externalLinks,
             isLocked: lesson.isLocked,
             isDownloadRestricted: lesson.isDownloadRestricted,
+            // LMS-004 / LMS-005 (a null publishAt clears the date).
+            isSequentialUnlock: lesson.isSequentialUnlock,
+            publishAt: lesson.publishAt ?? undefined,
           }),
         }),
       ),
@@ -412,7 +481,10 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
       throw ApiError.notFound("Course not found");
     }
 
-    return toPublicCourse(course);
+    // Prerequisites are other courses (NXA_CoursePrerequisites): list their titles publicly.
+    // Whether enrollment requires completing them is undecided, so nothing is enforced here.
+    const prerequisites = await deps.courses.findPrerequisites(course.id).catch(() => []);
+    return toPublicCourse({ ...course, prerequisites: prerequisites.map((p) => p.title) });
   },
 
   // =========================================================================
@@ -465,7 +537,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
    * status, publish flag or modules). Publishing is a separate, explicit
    * step through the status / publish endpoints.
    */
-  async createCourse(body: CreateCourseBody): Promise<Course> {
+  async createCourse(body: CreateCourseBody, audit?: CourseAuditFor<{ courseCode: string }>): Promise<Course> {
     // The HTTP schema already normalises and checks the slug. The service
     // repeats it because it must be safe when called WITHOUT HTTP
     // validation (a job, a script): otherwise `"Manage"` would bypass the
@@ -475,7 +547,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
 
     // Q2: no courseCode is generated - it is stored as supplied, or absent.
     return deps.courses
-      .create(toCreateCourseInput({ ...body, slug }))
+      .create(toCreateCourseInput({ ...body, slug }), audit)
       .catch(rethrowAsApiError);
   },
 
@@ -491,7 +563,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
    * status/visibility invariant here - the explicit whitelist below does.
    * Keep it a whitelist; never pass `body` through directly.
    */
-  async updateCourse(id: EntityId, body: UpdateCourseBody): Promise<Course> {
+  async updateCourse(id: EntityId, body: UpdateCourseBody, audit?: CourseAudit): Promise<Course> {
     // Explicit whitelist, not `definedOnly(body)`: the service must stay
     // safe when called without the HTTP schema, so even a caller passing
     // `status`/`isPublished`/`modules`/`slug` cannot get them through.
@@ -515,7 +587,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
       syllabusPdfUrl: body.syllabusPdfUrl,
     });
 
-    return deps.courses.update(id, input).catch(rethrowAsApiError);
+    return deps.courses.update(id, input, audit).catch(rethrowAsApiError);
   },
 
   /**
@@ -525,9 +597,36 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
    * silently overwrite each other until optimistic concurrency is decided.
    * The body is `{ modules }` so a version token can be added later.
    */
-  async replaceCurriculum(id: EntityId, modules: CurriculumModuleBody[]): Promise<Course> {
+  async replaceCurriculum(id: EntityId, modules: CurriculumModuleBody[], audit?: CourseAudit): Promise<Course> {
     checkCurriculumIntegrity(id, modules);
-    return deps.courses.replaceCurriculum(id, toCourseModules(modules)).catch(rethrowAsApiError);
+    let tree = toCourseModules(modules);
+    const defaults = deps.newLessonDefaults ? await deps.newLessonDefaults() : {};
+    if (defaults.sequentialUnlock !== undefined || defaults.downloadAllowed !== undefined) {
+      const stored = await deps.courses.findById(id);
+      if (stored === null) throw ApiError.notFound("Course not found");
+      const storedIds = new Set(stored.modules.flatMap((m) => m.chapters.flatMap((c) => c.lessons.map((l) => String(l.id)))));
+      tree = applyNewLessonDefaults(tree, storedIds, defaults);
+    }
+    return deps.courses.replaceCurriculum(id, tree, audit).catch(rethrowAsApiError);
+  },
+
+  /** `GET /courses/manage/:courseId/prerequisites` - the prerequisite courses. */
+  async getPrerequisites(id: EntityId): Promise<PrerequisiteCourse[]> {
+    return deps.courses.findPrerequisites(id).catch(rethrowAsApiError);
+  },
+
+  /**
+   * `PUT /courses/:courseId/prerequisites` - replace the prerequisite set.
+   * Structural rules only (existing courses, no self-dependency, no cycles).
+   * Whether enrollment requires completed prerequisites is not decided and
+   * is not enforced.
+   */
+  async replacePrerequisites(
+    id: EntityId,
+    prerequisiteCourseIds: string[],
+    audit?: CourseAuditFor<PrerequisiteCourse[]>,
+  ): Promise<{ prerequisites: PrerequisiteCourse[]; changed: boolean }> {
+    return deps.courses.replacePrerequisites(id, prerequisiteCourseIds, audit).catch(rethrowAsApiError);
   },
 
   /**
@@ -537,9 +636,9 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
    * `isPublished` is DERIVED here and written in the same single
    * `setPublication` call, so status and visibility cannot disagree.
    */
-  async setCourseStatus(id: EntityId, status: CourseStatus): Promise<Course> {
+  async setCourseStatus(id: EntityId, status: CourseStatus, audit?: CourseAudit): Promise<Course> {
     return deps.courses
-      .setPublication(id, { status, isPublished: isPublishedForStatus(status) })
+      .setPublication(id, { status, isPublished: isPublishedForStatus(status) }, audit)
       .catch(rethrowAsApiError);
   },
 
@@ -555,7 +654,7 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
    * against a concurrent change (Q24). Unpublishing an `Active` course
    * lands on `Draft`, exactly as the frontend does.
    */
-  async togglePublish(id: EntityId): Promise<Course> {
+  async togglePublish(id: EntityId, audit?: (isPublished: boolean) => CourseAudit | undefined): Promise<Course> {
     const course = await deps.courses.findById(id);
 
     if (course === null) {
@@ -563,9 +662,10 @@ export const createCourseService = (deps: CourseServiceDeps) => ({
     }
 
     const status: CourseStatus = course.isPublished ? "Draft" : "Published";
+    const isPublished = isPublishedForStatus(status);
 
     return deps.courses
-      .setPublication(id, { status, isPublished: isPublishedForStatus(status) })
+      .setPublication(id, { status, isPublished }, audit?.(isPublished))
       .catch(rethrowAsApiError);
   },
 });

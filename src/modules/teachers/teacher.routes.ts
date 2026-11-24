@@ -1,6 +1,6 @@
 import { Router, type RequestHandler } from "express";
 
-import { requireStudent, requireTeacher } from "../../middleware/authorize.middleware";
+import { requireAuth, requireStudent, requireTeacher } from "../../middleware/authorize.middleware";
 import { validate } from "../../middleware/validate.middleware";
 import { createTeacherController } from "./teacher.controller";
 import { createTeacherService, type TeacherServiceDeps } from "./teacher.service";
@@ -26,9 +26,12 @@ export const createTeacherRoutes = (options: TeacherRoutesOptions): Router => {
   const service = createTeacherService(options);
   const controller = createTeacherController(service);
 
+  // Authentication alone is not authorization: `requireAuth` must follow, so
+  // an unauthenticated request is refused and a limited-access student
+  // (CL-001) is denied by default. Previously this was authenticate only.
   const authGuards: RequestHandler[] = options.authenticate
-    ? [options.authenticate]
-    : [];
+    ? [options.authenticate, requireAuth]
+    : [requireAuth];
 
   const teacherGuards: RequestHandler[] = options.authenticate
     ? [options.authenticate, requireTeacher]
@@ -106,6 +109,10 @@ export const createTeacherRoutes = (options: TeacherRoutesOptions): Router => {
     validate({ body: replyDoubtBodySchema }),
     controller.replyDoubt,
   );
+
+  // 6a. LMS-004 / LMS-005: lessons for an actively enrolled student, enforced on the server.
+  router.get("/lms/courses/:courseId/lessons", ...studentGuards, controller.getLessonOutline);
+  router.get("/lms/courses/:courseId/lessons/:lessonId", ...studentGuards, controller.getLesson);
 
   // 6. LMS Lesson Progress
   router.post(

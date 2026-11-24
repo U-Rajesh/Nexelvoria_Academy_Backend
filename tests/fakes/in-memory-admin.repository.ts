@@ -1,7 +1,18 @@
 import type { EntityId } from "../../src/contracts/identifier.contract";
 import type { UserStatus } from "../../src/contracts/user.contract";
-import { RecordNotFoundError } from "../../src/repositories/repository.errors";
-import type { AdminRepository } from "../../src/modules/admin/admin.repository";
+import { DuplicateRecordError, RecordNotFoundError } from "../../src/repositories/repository.errors";
+import {
+  AdminRuleViolationError,
+  FREE_ACCESS_OVERRIDE_TYPE,
+  type AdminRepository,
+  type EnrollmentStatusValue,
+  type StaffAudit,
+  type TransactionalAudit,
+} from "../../src/modules/admin/admin.repository";
+import type { BatchStatusValue } from "../../src/modules/admin/admin.validation";
+import { checkCouponUsable, couponDiscountAmount } from "../../src/modules/payments/coupon-rules";
+import { HistoryLog } from "./history-log";
+import { financialYearLabel } from "../../src/modules/admin/reporting-period";
 import type {
   AdminProfile,
   AuditLogRecord,
@@ -13,7 +24,7 @@ import type {
   InstituteSettingsRecord,
   RefundRecord,
   SuperAdminDashboardStats,
-  SystemConfigRecord,
+  AdminCreatedStudent,
 } from "../../src/modules/admin/admin.types";
 import type { Student } from "../../src/modules/students/student.types";
 import type { Teacher } from "../../src/modules/teachers/teacher.types";
@@ -23,6 +34,8 @@ export class InMemoryAdminRepository implements AdminRepository {
   public batches: BatchRecord[] = [];
   public enrollments: EnrollmentAdminRecord[] = [];
   public auditLogs: AuditLogRecord[] = [];
+  /** Mirrors NXA_EnrollmentStatusHistory / NXA_FinancialAuditHistory writes. */
+  public history = new HistoryLog();
   public refunds: RefundRecord[] = [];
   public financialOverrides: FinancialOverrideRecord[] = [];
   public roles: GlobalRoleRecord[] = [];
@@ -30,6 +43,8 @@ export class InMemoryAdminRepository implements AdminRepository {
   public batchStudentsMap: Map<string, Student[]> = new Map();
   public teacherAllocationsMap: Map<string, string[]> = new Map(); // batchId -> teacherUserIds
 
+  /** When true the settings audit write fails and nothing is saved (rolled-back transaction). */
+  public failSettingsAudit = false;
   public instituteSettings: InstituteSettingsRecord = {
     instituteName: "Nexelvoria Academy",
     tagline: "Empowering Next-Gen Tech Leaders",
@@ -43,78 +58,8 @@ export class InMemoryAdminRepository implements AdminRepository {
     currencySymbol: "₹",
     gstNumber: "36AAAAA0000A1Z5",
   };
+  public settingsUpdatedBy: EntityId[] = [];
 
-  public systemConfig: SystemConfigRecord = {
-    institute: {
-      name: "Nexelvoria Academy",
-      code: "NXA",
-      affiliation: "State Technical Board",
-      supportEmail: "contact@nexelvoria.in",
-      supportPhone: "+91 80000 12345",
-      whatsappNumber: "+91 80000 12345",
-      address: "Hitec City, Hyderabad, Telangana",
-      website: "https://nexelvoria.in",
-      gstNumber: "36AAAAA0000A1Z5",
-      currency: "INR",
-      timezone: "Asia/Kolkata",
-    },
-    branding: {
-      logoUrl: "/logo.png",
-      faviconUrl: "/favicon.ico",
-      primaryColor: "#4f46e5",
-      secondaryColor: "#06b6d4",
-      tagline: "Empowering Next-Gen Tech Leaders",
-      motto: "Learn. Build. Excel.",
-    },
-    academic: {
-      currentAcademicYear: "2026-2027",
-      activeTerm: "Spring 2026",
-      isRegistrationOpen: true,
-      isCatalogPublic: true,
-      maxBatchCapacity: 40,
-      minAttendancePercentage: 75,
-      assignmentGracePeriodDays: 2,
-      passPercentage: 60,
-    },
-    paymentGateway: {
-      provider: "razorpay",
-      keyId: "rzp_test_key",
-      keySecretMasked: "••••••••••••",
-      webhookSecretMasked: "••••••••••••",
-      isLiveMode: false,
-      autoReconcile: true,
-    },
-    emailSms: {
-      smtpHost: "smtp.mailtrap.io",
-      smtpPort: 587,
-      smtpUser: "nexelvoria-auth",
-      smtpPasswordMasked: "••••••••••••",
-      senderName: "Nexelvoria Academy",
-      senderEmail: "notifications@nexelvoria.in",
-      isSmsEnabled: false,
-      smsProvider: "twilio",
-      smsApiKeyMasked: "••••••••••••",
-    },
-    notifications: {
-      emailOnAdmission: true,
-      emailOnPayment: true,
-      emailOnExamResult: true,
-      smsOnClassReminder: false,
-      pushAnnouncements: true,
-    },
-    security: {
-      sessionTimeoutMinutes: 60,
-      enforceTwoFactor: false,
-      maxFailedLogins: 5,
-      passwordExpiryDays: 90,
-      requireSpecialChars: true,
-    },
-    maintenance: {
-      isMaintenanceMode: false,
-      message: "System is undergoing scheduled maintenance.",
-      allowedIps: "127.0.0.1, ::1",
-    },
-  };
 
   constructor() {
     this.roles = [
@@ -150,6 +95,8 @@ export class InMemoryAdminRepository implements AdminRepository {
       activeBatches: this.batches.length,
       totalTeachers: this.teachers.length,
       totalRevenueINR: 5400000,
+      revenueFinancialYearINR: 1200000,
+      financialYearLabel: financialYearLabel(),
       pendingFeesINR: 320000,
       certificatesIssued: 45,
       placementRate: 88,
@@ -161,20 +108,36 @@ export class InMemoryAdminRepository implements AdminRepository {
     };
   }
 
+  /** Students with a placement record (NXA_PlacementRecords.StudentUserId), duplicates allowed. */
+  public placementRecordStudentIds: string[] = [];
+
+  async getPlacementCohort(range: { fromUtc: Date; toUtc: Date }): Promise<{ completedStudents: number; placedStudents: number }> {
+    // Mirrors the SQL adapter: distinct completed-in-range students, and those of them with a placement record.
+    const cohort = new Set(
+      this.enrollments
+        .filter((e) => e.enrollmentStatus === "completed" && e.completedAt && Date.parse(e.completedAt) >= range.fromUtc.getTime() && Date.parse(e.completedAt) < range.toUtc.getTime())
+        .map((e) => e.studentUserId),
+    );
+    const placed = new Set(this.placementRecordStudentIds);
+    return { completedStudents: cohort.size, placedStudents: [...cohort].filter((id) => placed.has(id)).length };
+  }
+
   async getSuperAdminDashboardStats(): Promise<SuperAdminDashboardStats> {
     return {
-      totalRevenueYTD: 5400000,
-      monthlyRecurringRevenue: 450000,
+      totalRevenueYTD: 1200000,
+      financialYearLabel: financialYearLabel(),
+      revenueThisMonth: 450000,
       totalActiveStudents: 105,
       totalFacultyMembers: this.teachers.length,
       totalAdminAccounts: this.admins.length,
-      pendingFinancialOverrides: this.financialOverrides.filter((f) => f.status === "pending").length,
+      // Mirrors the SQL adapter: overrides are authorized when recorded.
+      pendingFinancialOverrides: 0,
       pendingRefundRequests: this.refunds.filter((r) => r.refundStatus === "pending").length,
-      systemHealthScore: 99.8,
-      criticalSecurityAlerts: 0,
+      systemHealthScore: null,
+      criticalSecurityAlerts: null,
       activeCourseBatches: this.batches.length,
-      certificatesAwaitingSignoff: 2,
-      dataIntegrityStatus: "HEALTHY",
+      certificatesAwaitingSignoff: null,
+      dataIntegrityStatus: null,
     };
   }
 
@@ -197,12 +160,19 @@ export class InMemoryAdminRepository implements AdminRepository {
     name: string;
     email: string;
     mobile: string;
+    passwordHash: string;
+    assignedByUserId: EntityId;
     department?: string | undefined;
     permissions?: string[] | undefined;
     adminLevel?: string | undefined;
     employeeCode?: string | undefined;
-  }): Promise<AdminProfile> {
+  }, audit?: StaffAudit): Promise<AdminProfile> {
+    if (this.admins.some((a) => a.email.toLowerCase() === input.email.toLowerCase())) {
+      throw new DuplicateRecordError("user", "email", input.email.toLowerCase());
+    }
     const id = `adm-${this.admins.length + 1}`;
+    await this.staffAudit(audit, id);
+    this.passwordHashes.set(id, input.passwordHash);
     const admin: AdminProfile = {
       id,
       userId: id,
@@ -229,9 +199,17 @@ export class InMemoryAdminRepository implements AdminRepository {
       department?: string | undefined;
       permissions?: string[] | undefined;
     },
+    audit?: StaffAudit,
   ): Promise<AdminProfile> {
     const admin = await this.findAdminById(id);
     if (!admin) throw new RecordNotFoundError("admin", id);
+    const changes =
+      (input.name && input.name !== admin.name) ||
+      (input.mobile && input.mobile !== admin.mobile) ||
+      (input.department && input.department !== admin.department) ||
+      (input.permissions && JSON.stringify(input.permissions) !== JSON.stringify(admin.permissions));
+    if (!changes) return admin;
+    await this.staffAudit(audit, id);
     if (input.name) admin.name = input.name;
     if (input.mobile) admin.mobile = input.mobile;
     if (input.department) admin.department = input.department;
@@ -239,17 +217,23 @@ export class InMemoryAdminRepository implements AdminRepository {
     return admin;
   }
 
-  async setAdminStatus(id: EntityId, status: UserStatus): Promise<AdminProfile> {
+  async setAdminStatus(id: EntityId, status: UserStatus, audit?: StaffAudit): Promise<AdminProfile> {
     const admin = await this.findAdminById(id);
     if (!admin) throw new RecordNotFoundError("admin", id);
+    if (admin.status === status) return admin;
+    await this.staffAudit(audit, id);
     admin.status = status;
     return admin;
   }
 
-  async resetAdminPassword(id: EntityId): Promise<{ temporaryPassword?: string | undefined }> {
+  /** Stored argon2id hashes, keyed by admin id (for assertions only). */
+  readonly passwordHashes = new Map<EntityId, string>();
+
+  async setAdminPassword(id: EntityId, passwordHash: string, audit?: StaffAudit): Promise<void> {
     const admin = await this.findAdminById(id);
-    if (!admin) throw new RecordNotFoundError("admin", id);
-    return { temporaryPassword: "TempPassword#2026" };
+    if (!admin || admin.role !== "admin") throw new RecordNotFoundError("admin", id);
+    await this.staffAudit(audit, id);
+    this.passwordHashes.set(id, passwordHash);
   }
 
   async findBatches(filter?: { courseId?: string | undefined; status?: string | undefined }): Promise<BatchRecord[]> {
@@ -272,8 +256,9 @@ export class InMemoryAdminRepository implements AdminRepository {
     endDate?: string | undefined;
     capacity?: number | undefined;
     scheduleDescription?: string | undefined;
-  }): Promise<BatchRecord> {
+  }, audit?: StaffAudit): Promise<BatchRecord> {
     const id = `batch-${this.batches.length + 1}`;
+    await this.staffAudit(audit, id);
     const batch: BatchRecord = {
       id,
       courseId: input.courseId,
@@ -301,9 +286,18 @@ export class InMemoryAdminRepository implements AdminRepository {
       capacity?: number | undefined;
       scheduleDescription?: string | undefined;
     },
+    audit?: StaffAudit,
   ): Promise<BatchRecord> {
     const batch = await this.findBatchById(id);
     if (!batch) throw new RecordNotFoundError("batch", id);
+    const changes =
+      (input.batchName && input.batchName !== batch.batchName) ||
+      (input.startDate && input.startDate !== batch.startDate) ||
+      (input.endDate && input.endDate !== batch.endDate) ||
+      (input.capacity && input.capacity !== batch.capacity) ||
+      (input.scheduleDescription && input.scheduleDescription !== batch.scheduleDescription);
+    if (!changes) return batch;
+    await this.staffAudit(audit, id);
     if (input.batchName) batch.batchName = input.batchName;
     if (input.startDate) batch.startDate = input.startDate;
     if (input.endDate) batch.endDate = input.endDate;
@@ -313,29 +307,75 @@ export class InMemoryAdminRepository implements AdminRepository {
     return batch;
   }
 
-  async setBatchStatus(id: EntityId, status: string): Promise<BatchRecord> {
+  async setBatchStatus(id: EntityId, status: BatchStatusValue, audit?: StaffAudit): Promise<BatchRecord> {
     const batch = await this.findBatchById(id);
     if (!batch) throw new RecordNotFoundError("batch", id);
+    if (String(batch.status).toLowerCase() === String(status).toLowerCase()) return batch;
+    await this.staffAudit(audit, id);
     batch.status = status;
     batch.updatedAt = new Date().toISOString();
     return batch;
   }
 
-  async allocateTeacher(batchId: EntityId, teacherUserId: EntityId, _courseId?: EntityId): Promise<void> {
-    const teachers = this.teacherAllocationsMap.get(batchId) ?? [];
-    if (!teachers.includes(teacherUserId)) {
-      teachers.push(teacherUserId);
-      this.teacherAllocationsMap.set(batchId, teachers);
+  /** Teacher user ids the fake treats as active teacher accounts. */
+  readonly activeTeacherIds = new Set<string>();
+  /** Course id -> list price, standing in for NXA_Courses. */
+  readonly coursePrices = new Map<string, number>();
+  /** Upper-cased code -> coupon, standing in for NXA_Coupons joined to NXA_Discounts. */
+  readonly definedDiscounts = new Map<
+    string,
+    {
+      type: "percentage" | "fixed_amount";
+      value: number;
+      isActive: boolean;
+      startsAt?: Date;
+      endsAt?: Date;
+      usageLimit?: number | null;
+      perUserLimit?: number | null;
+      usageCount?: number;
     }
+  >();
+  /** Stands in for NXA_CouponRedemptions. */
+  readonly couponRedemptions: Array<{ code: string; enrollmentId: string; studentUserId: string; discountAmount: number }> = [];
+  /** Student id -> approval status, standing in for NXA_StudentProfiles. */
+  readonly studentApprovals = new Map<string, "pending" | "approved" | "rejected">();
+
+  async allocateTeacher(input: {
+    batchId: EntityId;
+    courseId: EntityId;
+    teacherUserId: EntityId;
+    allocatedByUserId: EntityId;
+  }, audit?: StaffAudit): Promise<void> {
+    const batch = await this.findBatchById(input.batchId);
+    if (!batch) throw new RecordNotFoundError("batch", input.batchId);
+    if (batch.courseId !== input.courseId) {
+      throw new AdminRuleViolationError("BATCH_COURSE_MISMATCH", "The selected batch does not belong to the selected course");
+    }
+    if (["completed", "cancelled"].includes(batch.status)) {
+      throw new AdminRuleViolationError("BATCH_CLOSED", `Cannot allocate a teacher to a ${batch.status} batch`);
+    }
+    if (!this.activeTeacherIds.has(input.teacherUserId)) {
+      throw new AdminRuleViolationError("NOT_A_TEACHER", "The selected user is not a teacher account");
+    }
+    const teachers = this.teacherAllocationsMap.get(input.batchId) ?? [];
+    if (teachers.includes(input.teacherUserId)) {
+      throw new DuplicateRecordError("allocation", "teacherUserId", input.teacherUserId);
+    }
+    await this.staffAudit(audit, input.batchId);
+    teachers.push(input.teacherUserId);
+    this.teacherAllocationsMap.set(input.batchId, teachers);
+    batch.allocatedTeacherIds = [...teachers];
   }
 
-  async unallocateTeacher(batchId: EntityId, teacherUserId: EntityId): Promise<void> {
+  async unallocateTeacher(batchId: EntityId, teacherUserId: EntityId, audit?: StaffAudit): Promise<void> {
     const teachers = this.teacherAllocationsMap.get(batchId) ?? [];
     const idx = teachers.indexOf(teacherUserId);
-    if (idx !== -1) {
-      teachers.splice(idx, 1);
-      this.teacherAllocationsMap.set(batchId, teachers);
-    }
+    if (idx === -1) throw new RecordNotFoundError("allocation", `${batchId}/${teacherUserId}`);
+    await this.staffAudit(audit, batchId);
+    teachers.splice(idx, 1);
+    this.teacherAllocationsMap.set(batchId, teachers);
+    const batch = await this.findBatchById(batchId);
+    if (batch) batch.allocatedTeacherIds = [...teachers];
   }
 
   async findBatchStudents(batchId: EntityId): Promise<Student[]> {
@@ -357,38 +397,211 @@ export class InMemoryAdminRepository implements AdminRepository {
     });
   }
 
+  async findEnrollmentById(id: EntityId): Promise<EnrollmentAdminRecord | null> {
+    return this.enrollments.find((e) => e.id === id) ?? null;
+  }
+
   async createEnrollment(input: {
     studentUserId: EntityId;
     courseId: EntityId;
     batchId?: EntityId | undefined;
-    coursePrice?: number | undefined;
-    discountAmount?: number | undefined;
-    finalAmount?: number | undefined;
-    currencyCode?: string | undefined;
+    discountCode?: string | undefined;
+    status: "approved_unpaid" | "active";
+    freeAccess?: boolean | undefined;
+    createdByUserId: EntityId;
+    capacityOverrideReason?: string | undefined;
+    prerequisiteOverrideReason?: string | undefined;
+    audit: TransactionalAudit;
   }): Promise<EnrollmentAdminRecord> {
+    const approval = this.studentApprovals.get(input.studentUserId);
+    if (!approval) throw new RecordNotFoundError("student", input.studentUserId);
+    if (approval !== "approved") {
+      throw new AdminRuleViolationError("STUDENT_NOT_APPROVED", "The student must be approved before enrollment (BR-002)");
+    }
+    const price = this.coursePrices.get(input.courseId);
+    if (price === undefined) throw new RecordNotFoundError("course", input.courseId);
+    let discount = 0;
+    const couponCode = input.discountCode?.toUpperCase();
+    const coupon = couponCode ? this.definedDiscounts.get(couponCode) : undefined;
+    if (couponCode) {
+      // Mirrors the SQL adapter: same rules module, same rejection codes.
+      if (!coupon) throw new AdminRuleViolationError("DISCOUNT_NOT_FOUND", "No coupon exists with this code");
+      const used = this.couponRedemptions.filter((r) => r.code === couponCode && r.studentUserId === input.studentUserId).length;
+      const rejection = checkCouponUsable(coupon, new Date(), coupon.perUserLimit != null ? used : null);
+      if (rejection) throw new AdminRuleViolationError(rejection.code, rejection.message);
+      discount = couponDiscountAmount(coupon.type, coupon.value, price);
+      if (discount <= 0) {
+        throw new AdminRuleViolationError("DISCOUNT_NOT_APPLICABLE", "This coupon gives no discount on this course");
+      }
+    }
+    if (input.freeAccess) discount = price;
+    if (input.batchId) {
+      const batch = await this.findBatchById(input.batchId);
+      if (!batch) throw new RecordNotFoundError("batch", input.batchId);
+      if (batch.courseId !== input.courseId) {
+        throw new AdminRuleViolationError("BATCH_COURSE_MISMATCH", "The selected batch does not belong to the selected course");
+      }
+    }
+    // D6 / D4, mirroring the SQL adapter.
+    let capacityOverride: { reason: string; capacity: number; enrolled: number } | null = null;
+    if (input.batchId) {
+      const batch = (await this.findBatchById(input.batchId))!;
+      const enrolled = this.enrollments.filter((e) => e.batchId === input.batchId && e.enrollmentStatus !== "cancelled").length;
+      if (batch.capacity !== null && batch.capacity !== undefined && enrolled >= batch.capacity) {
+        if (!input.capacityOverrideReason) {
+          throw new AdminRuleViolationError("BATCH_FULL", `This batch is full (${enrolled} of ${batch.capacity}). Give a capacity override reason to enroll anyway.`, 409);
+        }
+        capacityOverride = { reason: input.capacityOverrideReason, capacity: batch.capacity, enrolled };
+      }
+    }
+    const prereqs = this.prerequisitesOf ? await this.prerequisitesOf(input.courseId) : [];
+    const missing = prereqs.filter(
+      (p) => !this.enrollments.some((e) => e.studentUserId === input.studentUserId && e.courseId === p.courseId && e.enrollmentStatus === "completed"),
+    );
+    let prerequisiteOverride: { reason: string; missingCourseIds: string[] } | null = null;
+    if (missing.length > 0) {
+      if (!input.prerequisiteOverrideReason) {
+        throw new AdminRuleViolationError("PREREQUISITES_NOT_MET", `Prerequisite course(s) not completed: ${missing.map((p) => (p.courseCode ? `${p.title} (${p.courseCode})` : p.title)).join(", ")}. Give a prerequisite override reason to enroll anyway.`);
+      }
+      prerequisiteOverride = { reason: input.prerequisiteOverrideReason, missingCourseIds: missing.map((p) => p.courseId) };
+    }
+    if (this.failEnrollmentAudit) throw new Error("audit write failed");
+    if (
+      this.enrollments.some(
+        (e) => e.studentUserId === input.studentUserId && e.courseId === input.courseId && e.enrollmentStatus !== "cancelled",
+      )
+    ) {
+      throw new DuplicateRecordError("enrollment", "courseId", input.courseId);
+    }
+
     const id = `enr-${this.enrollments.length + 1}`;
     const enr: EnrollmentAdminRecord = {
       id,
       studentUserId: input.studentUserId,
       courseId: input.courseId,
       ...(input.batchId ? { batchId: input.batchId } : {}),
-      enrollmentNumber: `ENR-${Date.now().toString().slice(-6)}`,
-      enrollmentStatus: "active",
-      coursePrice: input.coursePrice ?? 45000,
-      discountAmount: input.discountAmount ?? 0,
-      finalAmount: input.finalAmount ?? input.coursePrice ?? 45000,
-      currencyCode: input.currencyCode ?? "INR",
-      enrollmentSource: "ADMIN_MANUAL",
+      enrollmentNumber: `ENR-FAKE-${this.enrollments.length + 1}`,
+      enrollmentStatus: input.status,
+      coursePrice: price,
+      discountAmount: discount,
+      finalAmount: price - discount,
+      currencyCode: "INR",
+      enrollmentSource: "admin",
+      ...(input.status === "active" ? { activatedAt: new Date().toISOString() } : {}),
       createdAt: new Date().toISOString(),
     };
     this.enrollments.push(enr);
+    if (couponCode && coupon) {
+      this.couponRedemptions.push({ code: couponCode, enrollmentId: id, studentUserId: input.studentUserId, discountAmount: discount });
+      coupon.usageCount = (coupon.usageCount ?? 0) + 1;
+    }
+    // Mirrors the SQL adapter: a free-access grant is recorded as an override
+    // authorized by the granting user.
+    let overrideId: string | null = null;
+    if (input.freeAccess) {
+      overrideId = `fov-${this.financialOverrides.length + 1}`;
+      const now = new Date().toISOString();
+      this.financialOverrides.push({
+        id: overrideId,
+        studentId: input.studentUserId,
+        courseId: input.courseId,
+        enrollmentId: id,
+        originalAmountINR: price,
+        proposedAmountINR: 0,
+        discountOrWaiverINR: price,
+        adjustmentType: FREE_ACCESS_OVERRIDE_TYPE,
+        reason: input.audit.reason ?? "",
+        requestedByAdminId: input.audit.actorUserId,
+        requestedAt: now,
+        status: "approved",
+        decidedAt: now,
+      });
+    }
+    // Mirrors the SQL adapter: the audit row is written atomically with the change.
+    await this.createAuditLog({
+      actorUserId: input.audit.actorUserId,
+      actionType: input.audit.actionType,
+      moduleCode: "ENROLLMENT_MGMT",
+      entityName: "Enrollment",
+      entityId: id,
+      newValues: JSON.stringify({
+        status: input.status,
+        requestedByUserId: input.audit.actorUserId,
+        coursePrice: price,
+        finalAmount: price - discount,
+        ...(input.freeAccess
+          ? { freeAccess: true, waivedAmount: price, overrideId, overrideType: FREE_ACCESS_OVERRIDE_TYPE }
+          : {}),
+        ...(input.audit.reason ? { reason: input.audit.reason } : {}),
+        ...(capacityOverride ? { capacityOverride } : {}),
+        ...(prerequisiteOverride ? { prerequisiteOverride } : {}),
+      }),
+    });
+    this.history.enrollmentStatus.push({
+      enrollmentId: id,
+      oldStatus: null,
+      newStatus: input.status.toUpperCase(),
+      changedByUserId: input.audit.actorUserId,
+      reason: input.audit.reason,
+    });
+    if (input.freeAccess && overrideId) {
+      this.history.financial.push({
+        entityType: "EnrollmentOverride",
+        entityId: overrideId,
+        actionType: input.audit.actionType,
+        performedByUserId: input.audit.actorUserId,
+        newValues: { enrollmentId: id, coursePrice: price, waivedAmount: price, finalAmount: price - discount },
+        reason: input.audit.reason,
+      });
+    }
+    if (couponCode && coupon) {
+      this.history.financial.push({
+        entityType: "CouponRedemption",
+        entityId: `red-${this.couponRedemptions.length}`,
+        actionType: "REDEEM_COUPON",
+        performedByUserId: input.audit.actorUserId,
+        newValues: { enrollmentId: id, couponCode, discountAmount: discount },
+      });
+    }
     return enr;
   }
 
-  async setEnrollmentStatus(id: EntityId, status: string): Promise<EnrollmentAdminRecord> {
+  async setEnrollmentStatus(
+    id: EntityId,
+    status: EnrollmentStatusValue,
+    audit: TransactionalAudit,
+  ): Promise<EnrollmentAdminRecord> {
     const enr = this.enrollments.find((e) => e.id === id);
     if (!enr) throw new RecordNotFoundError("enrollment", id);
+    if (enr.enrollmentStatus === status) {
+      throw new AdminRuleViolationError("STATUS_UNCHANGED", `Enrollment is already ${status}`);
+    }
+    if (status === "active" && !(enr.enrollmentStatus === "suspended" && enr.activatedAt)) {
+      throw new AdminRuleViolationError(
+        "ACTIVATION_REQUIRES_PAYMENT",
+        "Enrollment access is granted only by a verified payment, a recorded manual payment or a free-access override. Manual activation can only resume a suspended enrollment that was already activated.",
+      );
+    }
+    const oldStatus = enr.enrollmentStatus;
     enr.enrollmentStatus = status;
+    if (status === "active" && !enr.activatedAt) enr.activatedAt = new Date().toISOString();
+    if (status === "completed" && !enr.completedAt) enr.completedAt = new Date().toISOString();
+    await this.createAuditLog({
+      actorUserId: audit.actorUserId,
+      actionType: audit.actionType,
+      moduleCode: "ENROLLMENT_MGMT",
+      entityName: "Enrollment",
+      entityId: id,
+      oldValues: JSON.stringify({ status: oldStatus }),
+      newValues: JSON.stringify({ status, ...(audit.reason ? { reason: audit.reason } : {}) }),
+    });
+    this.history.enrollmentStatus.push({
+      enrollmentId: id,
+      oldStatus: oldStatus.toUpperCase(),
+      newStatus: status.toUpperCase(),
+      changedByUserId: audit.actorUserId,
+      reason: audit.reason,
+    });
     return enr;
   }
 
@@ -442,22 +655,37 @@ export class InMemoryAdminRepository implements AdminRepository {
 
   async saveInstituteSettings(
     settings: Partial<InstituteSettingsRecord>,
-    _updatedByUserId?: EntityId,
+    updatedByUserId: EntityId,
   ): Promise<InstituteSettingsRecord> {
-    Object.assign(this.instituteSettings, settings);
+    // Mirrors the SQL adapter: only changed keys are written and audited, an
+    // empty string clears a value, and change + audit are atomic.
+    const oldValues: Record<string, unknown> = {};
+    const newValues: Record<string, unknown> = {};
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(settings)) {
+      if (v === undefined) continue;
+      const key = k as keyof InstituteSettingsRecord;
+      const value = v === "" ? undefined : v;
+      if (this.instituteSettings[key] === value) continue;
+      oldValues[k] = this.instituteSettings[key] ?? null;
+      newValues[k] = v;
+      next[k] = value;
+    }
+    this.settingsUpdatedBy.push(updatedByUserId);
+    if (Object.keys(newValues).length > 0) {
+      if (this.failSettingsAudit) throw new Error("audit write failed");
+      Object.assign(this.instituteSettings, next);
+      await this.createAuditLog({
+        actorUserId: updatedByUserId,
+        actionType: "UPDATE_SETTINGS",
+        moduleCode: "INSTITUTE_SETTINGS",
+        entityName: "InstituteSettings",
+        entityId: "institute",
+        oldValues: JSON.stringify(oldValues),
+        newValues: JSON.stringify(newValues),
+      });
+    }
     return this.instituteSettings;
-  }
-
-  async getSystemConfig(): Promise<SystemConfigRecord> {
-    return this.systemConfig;
-  }
-
-  async saveSystemConfig(
-    config: Partial<SystemConfigRecord>,
-    _updatedByUserId?: EntityId,
-  ): Promise<SystemConfigRecord> {
-    Object.assign(this.systemConfig, config);
-    return this.systemConfig;
   }
 
   async findRefunds(status?: string | undefined): Promise<RefundRecord[]> {
@@ -469,15 +697,42 @@ export class InMemoryAdminRepository implements AdminRepository {
 
   async updateRefundStatus(
     id: EntityId,
-    status: string,
+    status: "approved" | "rejected",
     decidedByUserId: EntityId,
-    _remarks?: string | undefined,
+    remarks?: string | undefined,
   ): Promise<RefundRecord> {
     const ref = this.refunds.find((r) => r.id === id);
     if (!ref) throw new RecordNotFoundError("refund", id);
+    if (ref.refundStatus !== "pending") {
+      throw new AdminRuleViolationError(
+        "REFUND_ALREADY_DECIDED",
+        `This refund is already ${ref.refundStatus} and cannot be decided again`,
+        409,
+      );
+    }
     ref.refundStatus = status;
-    ref.approvedAt = new Date().toISOString();
-    ref.approvedBySuperAdminUserId = decidedByUserId;
+    if (status === "approved") {
+      ref.approvedAt = new Date().toISOString();
+      ref.approvedBySuperAdminUserId = decidedByUserId;
+    }
+    await this.createAuditLog({
+      actorUserId: decidedByUserId,
+      actionType: status === "approved" ? "APPROVE_REFUND" : "REJECT_REFUND",
+      moduleCode: "FINANCE",
+      entityName: "Refund",
+      entityId: id,
+      oldValues: JSON.stringify({ status: "pending" }),
+      newValues: JSON.stringify({ status, amount: ref.amount, ...(remarks ? { remarks } : {}) }),
+    });
+    this.history.financial.push({
+      entityType: "Refund",
+      entityId: id,
+      actionType: status === "approved" ? "APPROVE_REFUND" : "REJECT_REFUND",
+      performedByUserId: decidedByUserId,
+      oldValues: { refundStatus: "PENDING" },
+      newValues: { refundStatus: status.toUpperCase(), amount: ref.amount },
+      reason: remarks,
+    });
     return ref;
   }
 
@@ -491,52 +746,38 @@ export class InMemoryAdminRepository implements AdminRepository {
   async updateFinancialOverride(
     id: EntityId,
     status: "approved" | "rejected",
-    decidedByUserId: EntityId,
-    remarks?: string | undefined,
+    _decidedByUserId: EntityId,
+    _remarks?: string | undefined,
   ): Promise<FinancialOverrideRecord> {
+    // Mirrors the SQL adapter: overrides are authorized when granted; never changes data.
+    if (status === "rejected") {
+      throw new AdminRuleViolationError(
+        "OVERRIDE_REJECTION_UNSUPPORTED",
+        "A financial override is authorized when it is granted and cannot be rejected afterwards. No change was made.",
+      );
+    }
     const found = this.financialOverrides.find((f) => f.id === id);
-    if (!found) throw new RecordNotFoundError("override", id);
-    found.status = status;
-    found.decidedAt = new Date().toISOString();
-    found.decidedBySuperAdminId = decidedByUserId;
-    if (remarks) found.superAdminRemarks = remarks;
-    return found;
+    if (!found) throw new RecordNotFoundError("financial override", id);
+    throw new AdminRuleViolationError(
+      "OVERRIDE_ALREADY_DECIDED",
+      "This financial override was approved when it was granted. No change was made.",
+      409,
+    );
   }
 
   async findRoles(): Promise<GlobalRoleRecord[]> {
-    return this.roles;
+    // Mirrors the SQL adapter: no permission catalog yet, so no permissions.
+    return this.roles.map((r) => ({ ...r, permissions: [] }));
   }
 
-  async createRole(role: {
-    roleCode: string;
-    roleName: string;
-    description: string;
-    permissions: string[];
-  }): Promise<GlobalRoleRecord> {
-    const id = `role-${this.roles.length + 1}`;
-    const newRole: GlobalRoleRecord = {
-      id,
-      roleCode: role.roleCode,
-      roleName: role.roleName,
-      description: role.description,
-      isSystemRole: false,
-      isActive: true,
-      permissions: role.permissions,
-      createdAt: new Date().toISOString(),
-    };
-    this.roles.push(newRole);
-    return newRole;
-  }
+  /** User ids the fake treats as locked out (FailedLoginAttempts / IsLocked / LockoutUntil set). */
+  readonly lockedUserIds = new Set<string>();
 
-  async updateRolePermissions(roleId: EntityId, permissions: string[]): Promise<GlobalRoleRecord> {
-    const role = this.roles.find((r) => r.id === roleId);
-    if (!role) throw new RecordNotFoundError("role", roleId);
-    role.permissions = permissions;
-    return role;
-  }
-
-  async unlockUserAccount(_userId: EntityId): Promise<void> {
-    // No-op for fake
+  async unlockUserAccount(userId: EntityId, audit?: StaffAudit): Promise<void> {
+    // Nothing to clear: no write and no audit (mirrors the SQL adapter).
+    if (!this.lockedUserIds.has(userId)) return;
+    await this.staffAudit(audit, userId);
+    this.lockedUserIds.delete(userId);
   }
 
   async findTeachers(filter?: { search?: string | undefined; status?: string | undefined }): Promise<Teacher[]> {
@@ -550,6 +791,59 @@ export class InMemoryAdminRepository implements AdminRepository {
     });
   }
 
+  /**
+   * Where admin-created students are persisted. The test harness binds this
+   * to the user and student fakes so OTP verification and approval see the
+   * same account; without it the fake keeps its own ids.
+   */
+  public studentAccountSink?: (input: {
+    name: string;
+    email: string;
+    mobile: string;
+    collegeName?: string | undefined;
+  }) => Promise<string>;
+  public createdStudentIds: string[] = [];
+
+  async createStudentUser(input: {
+    name: string;
+    email: string;
+    mobile: string;
+    passwordHash: string;
+    createdByUserId: EntityId;
+    collegeName?: string | undefined;
+    interestedCourseId?: EntityId | undefined;
+  }): Promise<AdminCreatedStudent> {
+    if (input.interestedCourseId !== undefined && !this.coursePrices.has(input.interestedCourseId)) {
+      throw new AdminRuleViolationError("COURSE_NOT_FOUND", "The selected course does not exist");
+    }
+    const id = this.studentAccountSink
+      ? await this.studentAccountSink(input)
+      : `adm-stu-${this.createdStudentIds.length + 1}`;
+    this.createdStudentIds.push(id);
+    this.studentApprovals.set(id, "pending");
+    this.passwordHashes.set(id, input.passwordHash);
+    await this.createAuditLog({
+      actorUserId: input.createdByUserId,
+      actionType: "CREATE_STUDENT",
+      moduleCode: "STUDENT_MGMT",
+      entityName: "Student",
+      entityId: id,
+      newValues: JSON.stringify({ email: input.email, accountStatus: "pending", approvalStatus: "pending" }),
+    });
+    return {
+      id,
+      name: input.name,
+      email: input.email.toLowerCase(),
+      mobile: input.mobile,
+      accountStatus: "pending",
+      approvalStatus: "pending",
+      isEmailVerified: false,
+      isMobileVerified: false,
+      accountState: "pending_verification",
+      createdAt: new Date().toISOString(),
+    };
+  }
+
   async createTeacherUser(input: {
     name: string;
     email: string;
@@ -558,8 +852,9 @@ export class InMemoryAdminRepository implements AdminRepository {
     experienceYears?: number | undefined;
     qualifications?: string | undefined;
     bio?: string | undefined;
-  }): Promise<Teacher> {
+  }, audit?: StaffAudit): Promise<Teacher> {
     const id = `tch-${this.teachers.length + 1}`;
+    await this.staffAudit(audit, id);
     const teacher: Teacher = {
       id,
       name: input.name,
@@ -578,5 +873,75 @@ export class InMemoryAdminRepository implements AdminRepository {
     };
     this.teachers.push(teacher);
     return teacher;
+  }
+
+  /** D4: prerequisite courses of a course (the harness reads the course fake). */
+  prerequisitesOf?: (courseId: string) => Promise<Array<{ courseId: string; courseCode?: string | undefined; title: string }>>;
+  /** Test hook: the enrollment audit write fails; nothing is stored (as the SQL transaction). */
+  public failEnrollmentAudit = false;
+
+  /** Test hook: the teacher audit write fails, proving the change rolls back. */
+  public failTeacherAudit = false;
+
+  /**
+   * Test hook: a staff action's audit write (admin, batch, allocation, unlock,
+   * teacher create) fails. The fake writes the audit before applying the
+   * change, so a failure leaves nothing changed - like the SQL transaction.
+   */
+  public failStaffAudit = false;
+
+  private async staffAudit(audit: StaffAudit | undefined, entityId: string): Promise<void> {
+    if (!audit) return;
+    if (this.failStaffAudit) throw new Error("audit write failed");
+    await this.createAuditLog({
+      actorUserId: audit.actorUserId,
+      actionType: audit.actionType,
+      moduleCode: audit.moduleCode,
+      entityName: audit.entityName,
+      entityId,
+      details: audit.details,
+    });
+  }
+
+  private async teacherAudit(entry: { actorUserId: EntityId; actionType: string; entityId: string; oldValues: string; newValues: string }): Promise<void> {
+    if (this.failTeacherAudit) throw new Error("audit write failed");
+    await this.createAuditLog({ ...entry, moduleCode: "TEACHER_MGMT", entityName: "Teacher" });
+  }
+
+  async updateTeacher(
+    id: EntityId,
+    changes: { name?: string | undefined; specialization?: string | null | undefined; experienceYears?: number | undefined; qualifications?: string | null | undefined; bio?: string | null | undefined },
+    actorUserId: EntityId,
+  ): Promise<{ record: Teacher; changed: boolean }> {
+    const t = this.teachers.find((x) => x.id === String(id));
+    if (!t) throw new RecordNotFoundError("teacher", id);
+    const before: Record<string, unknown> = { name: t.name, specialization: t.specialization || null, experienceYears: t.experienceYears, qualifications: t.qualifications || null, bio: t.bio || null };
+    const norm = (v: unknown) => (v === "" ? null : v);
+    const diff = (Object.keys(changes) as Array<keyof typeof changes>).filter((k) => changes[k] !== undefined && norm(changes[k]) !== before[k]);
+    if (diff.length === 0) return { record: { ...t }, changed: false };
+    const snapshot = { ...t };
+    for (const k of diff) (t as unknown as Record<string, unknown>)[k] = norm(changes[k]) ?? "";
+    try {
+      await this.teacherAudit({ actorUserId, actionType: "UPDATE_TEACHER", entityId: String(id), oldValues: JSON.stringify(before), newValues: JSON.stringify(changes) });
+    } catch (err) {
+      Object.assign(t, snapshot);
+      throw err;
+    }
+    return { record: { ...t }, changed: true };
+  }
+
+  async setTeacherStatus(id: EntityId, status: "active" | "deactivated", _reason: string | undefined, actorUserId: EntityId): Promise<{ record: Teacher; changed: boolean }> {
+    const t = this.teachers.find((x) => x.id === String(id));
+    if (!t) throw new RecordNotFoundError("teacher", id);
+    if (t.status === status) return { record: { ...t }, changed: false };
+    const previous = t.status;
+    t.status = status;
+    try {
+      await this.teacherAudit({ actorUserId, actionType: status === "active" ? "ACTIVATE_TEACHER" : "DEACTIVATE_TEACHER", entityId: String(id), oldValues: JSON.stringify({ status: previous }), newValues: JSON.stringify({ status }) });
+    } catch (err) {
+      t.status = previous;
+      throw err;
+    }
+    return { record: { ...t }, changed: true };
   }
 }

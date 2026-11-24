@@ -5,7 +5,7 @@ import type sql from "mssql";
 import { SqlServerStudentRepository } from "../src/modules/students/sqlserver-student.repository";
 import { SqlServerCourseRepository } from "../src/modules/courses/sqlserver-course.repository";
 import { SqlServerEnrollmentRepository } from "../src/modules/enrollments/sqlserver-enrollment.repository";
-import { DuplicateRecordError, RecordNotFoundError } from "../src/repositories/repository.errors";
+import { DuplicateRecordError, RecordInUseError, RecordNotFoundError, UnsupportedFieldsError } from "../src/repositories/repository.errors";
 
 // Mock SQL Request and ConnectionPool
 class MockSqlRequest {
@@ -39,6 +39,12 @@ const createMockPool = (
 ): sql.ConnectionPool => {
   return {
     request: () => new MockSqlRequest(handler),
+    transaction: () => ({
+      begin: async () => handler("BEGIN TRAN", {}),
+      commit: async () => handler("COMMIT", {}),
+      rollback: async () => handler("ROLLBACK", {}),
+      request: () => new MockSqlRequest(handler),
+    }),
   } as unknown as sql.ConnectionPool;
 };
 
@@ -291,19 +297,166 @@ describe("SqlServerCourseRepository (unit with mock pool)", () => {
           title: "Full Stack Python",
           shortDescription: "Short",
           longDescription: "Long",
-          thumbnailUrl: "/thumb.png",
           durationWeeks: 12,
-          totalHours: 120,
           feeINR: 20000,
           level: "Beginner",
-          category: "Software Development",
-          technologies: [],
-          hasPlacementGuarantee: false,
-          prerequisites: [],
-          learningOutcomes: [],
         }),
       DuplicateRecordError,
     );
+  });
+
+  it("refuses fields NXA_Courses cannot store instead of silently dropping them", async () => {
+    let wrote = false;
+    const pool = createMockPool(() => {
+      wrote = true;
+      return { recordset: [] };
+    });
+    const repo = new SqlServerCourseRepository(pool);
+    await assert.rejects(
+      () =>
+        repo.create({
+          slug: "fs-python",
+          title: "Full Stack Python",
+          shortDescription: "Short",
+          longDescription: "Long",
+          durationWeeks: 12,
+          feeINR: 20000,
+          level: "Beginner",
+          category: "Data & AI",
+          technologies: ["Python"],
+        }),
+      (err: Error & { fields?: string[] }) =>
+        err instanceof UnsupportedFieldsError && err.fields?.join(",") === "category,technologies",
+    );
+    await assert.rejects(() => repo.update("10", { totalHours: 90 }), UnsupportedFieldsError);
+    await assert.rejects(() => repo.update("10", { courseCode: "NEW-CODE" }), UnsupportedFieldsError);
+    assert.equal(wrote, false, "nothing reaches the database");
+  });
+
+  describe("curriculum save keeps ids stable", () => {
+    const course = { CourseId: 10, CourseCode: "FS", CourseName: "FS", Status: "DRAFT", ListPrice: 1, DurationValue: 12 };
+    const storedIds = [
+      { ModuleId: 101, ChapterId: 201, LessonId: 301 },
+      { ModuleId: 101, ChapterId: 201, LessonId: 302 },
+    ];
+    const tree = (lessons: { id: string; title: string; videoUrl?: string; pdfUrl?: string }[]) => [
+      {
+        id: "101", courseId: "10", title: "M1", description: "", order: 1,
+        chapters: [{
+          id: "201", moduleId: "101", title: "C1", order: 1,
+          lessons: lessons.map((l, i) => ({ chapterId: "201", durationMinutes: 10, isFreePreview: false, order: i + 1, ...l })),
+        }],
+      },
+    ];
+
+    it("updates kept lessons in place, inserts new ones and deletes removed ones in one transaction", async () => {
+      const log: string[] = [];
+      let lessonUpdateInputs: Record<string, unknown> = {};
+      const pool = createMockPool((q, inputs) => {
+        if (["BEGIN TRAN", "COMMIT", "ROLLBACK"].includes(q)) {
+          log.push(q);
+          return { recordset: [] };
+        }
+        if (q.includes("FROM dbo.NXA_CourseVersions")) return { recordset: [{ CourseVersionId: 9, IsCurrent: true }] };
+        if (q.includes("WITH (UPDLOCK, HOLDLOCK)")) return { recordset: storedIds };
+        if (q.includes("UPDATE dbo.NXA_Lessons")) {
+          log.push(`update-lesson:${inputs["id"]}`);
+          lessonUpdateInputs = { ...inputs };
+          return { recordset: [] };
+        }
+        if (q.includes("INSERT INTO dbo.NXA_Lessons")) {
+          log.push("insert-lesson");
+          return { recordset: [] };
+        }
+        if (q.includes("DELETE FROM dbo.NXA_Lessons")) {
+          log.push(`delete-lesson:${inputs["id"]}`);
+          return { recordset: [] };
+        }
+        if (q.includes("DELETE")) {
+          log.push("delete-other");
+          return { recordset: [] };
+        }
+        if (q.includes("FROM dbo.NXA_CourseModules")) return { recordset: [] };
+        return { recordset: [course] };
+      });
+      const repo = new SqlServerCourseRepository(pool);
+
+      await repo.replaceCurriculum(
+        "10",
+        tree([
+          { id: "301", title: "Kept lesson", videoUrl: "https://video.example/1" },
+          { id: "client-new-1", title: "New lesson" },
+        ]),
+      );
+
+      assert.ok(log.includes("update-lesson:301"), "lesson 301 keeps its id");
+      assert.equal(lessonUpdateInputs["url"], "https://video.example/1", "video URL is saved");
+      assert.ok(log.includes("insert-lesson"));
+      assert.ok(log.includes("delete-lesson:302"), "the removed lesson is deleted");
+      assert.ok(!log.includes("delete-other"), "the kept module and chapter are not deleted");
+      assert.equal(log[0], "BEGIN TRAN");
+      assert.ok(log.includes("COMMIT"));
+    });
+
+    it("rolls back and reports in-use when a removed lesson still has linked records", async () => {
+      const log: string[] = [];
+      const pool = createMockPool((q) => {
+        if (["BEGIN TRAN", "COMMIT", "ROLLBACK"].includes(q)) {
+          log.push(q);
+          return { recordset: [] };
+        }
+        if (q.includes("FROM dbo.NXA_CourseVersions")) return { recordset: [{ CourseVersionId: 9, IsCurrent: true }] };
+        if (q.includes("WITH (UPDLOCK, HOLDLOCK)")) return { recordset: storedIds };
+        if (q.includes("DELETE FROM dbo.NXA_Lessons")) {
+          const fk = new Error("The DELETE statement conflicted with the REFERENCE constraint");
+          (fk as unknown as { number: number }).number = 547;
+          return fk;
+        }
+        if (q.includes("FROM dbo.NXA_CourseModules")) return { recordset: [] };
+        return { recordset: [course] };
+      });
+      await assert.rejects(
+        () => new SqlServerCourseRepository(pool).replaceCurriculum("10", tree([{ id: "301", title: "Kept" }])),
+        RecordInUseError,
+      );
+      assert.ok(log.includes("ROLLBACK"));
+      assert.ok(!log.includes("COMMIT"));
+    });
+
+    it("refuses lesson content the table cannot store", async () => {
+      const pool = createMockPool(() => ({ recordset: [course] }));
+      await assert.rejects(
+        () => new SqlServerCourseRepository(pool).replaceCurriculum("10", tree([{ id: "301", title: "L", pdfUrl: "https://x/y.pdf" }])),
+        UnsupportedFieldsError,
+      );
+    });
+  });
+
+  it("persists duration on update and never changes the free-preview flag when publishing", async () => {
+    const course = {
+      CourseId: 10, CourseCode: "FS-PYTHON", CourseName: "FS", Status: "DRAFT", ListPrice: 1,
+      DurationValue: 12, DurationUnit: "WEEKS", IsPreviewEnabled: 1,
+    };
+    const writes: { q: string; inputs: Record<string, unknown> }[] = [];
+    const pool = createMockPool((q, inputs) => {
+      if (q.includes("UPDATE dbo.NXA_Courses")) {
+        writes.push({ q, inputs: { ...inputs } });
+        return { recordset: [], rowsAffected: [1] };
+      }
+      if (q.includes("FROM dbo.NXA_CourseModules")) return { recordset: [] };
+      return { recordset: [course] };
+    });
+    const repo = new SqlServerCourseRepository(pool);
+
+    await repo.update("10", { durationWeeks: 20 });
+    assert.match(writes[0]!.q, /DurationValue = @durationVal/);
+    assert.equal(writes[0]!.inputs["durationVal"], 20);
+
+    await repo.setPublished("10", true);
+    await repo.setStatus("10", "Archived");
+    for (const w of writes.slice(1)) {
+      assert.doesNotMatch(w.q, /IsPreviewEnabled/, "publication must not toggle the preview switch");
+    }
   });
 });
 

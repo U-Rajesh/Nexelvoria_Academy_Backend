@@ -102,7 +102,8 @@ export class InMemoryCredentialRepository implements CredentialRepository {
     const { lockedUntil: _lockedUntil, lastFailedLoginAt: _last, ...rest } = record;
     void _lockedUntil;
     void _last;
-    return rest;
+    // Unlocking clears the stored flag too (it is only ever set by a failure).
+    return rest.isLocked === undefined ? rest : { ...rest, isLocked: false };
   }
 
   // --- ordinary reads and writes ----------------------------------------
@@ -223,6 +224,11 @@ export class InMemoryCredentialRepository implements CredentialRepository {
     existing.failedLoginAttempts += 1;
     existing.lastFailedLoginAt = now.toISOString();
     existing.updatedAt = now.toISOString();
+    // Mirrors the SQL adapter: the lock is decided here, with the threshold
+    // in force now, and stored (D7: never retroactive).
+    // From the first failure on, the record carries the stored flag, as
+    // NXA_Users.IsLocked: a later threshold change cannot lock it retroactively.
+    existing.isLocked = existing.isLocked === true || existing.failedLoginAttempts >= input.threshold;
 
     // Nothing sets `lockedUntil`. Lockout is counter-based and permanent
     // until an explicit unlock - see the policy note in credential.types.ts

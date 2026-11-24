@@ -16,6 +16,20 @@ const actorId = (req: Request): string => {
   return id;
 };
 
+/**
+ * POST creates (any id in the body is ignored); PUT /:id updates exactly the
+ * record in the URL and refuses a body id that names a different record.
+ */
+const withRouteId = <T>(req: Request): T => {
+  const body = req.body as Record<string, unknown>;
+  const urlId = req.params.id as string | undefined;
+  if (urlId === undefined) return { ...body, id: "" } as T;
+  if (body.id !== undefined && body.id !== "" && String(body.id) !== urlId) {
+    throw ApiError.validation([{ field: "id", message: "The id in the body does not match the id in the URL." }], "The id in the body does not match the id in the URL.");
+  }
+  return { ...body, id: urlId } as T;
+};
+
 export class CmsController {
   constructor(private readonly cmsService: CmsService) {}
 
@@ -91,7 +105,8 @@ export class CmsController {
 
   submitPublicEnquiry = async (req: Request, res: Response): Promise<void> => {
     const enquiry = await this.cmsService.submitPublicEnquiry(req.body);
-    sendCreated(res, { data: enquiry, message: "Enquiry submitted successfully" });
+    const message = req.body.type === "callback" ? "Callback request received. Our team will call you back." : "Enquiry submitted successfully";
+    sendCreated(res, { data: enquiry, message });
   };
 
   subscribePublicNewsletter = async (req: Request, res: Response): Promise<void> => {
@@ -131,7 +146,7 @@ export class CmsController {
   };
 
   saveArticle = async (req: Request, res: Response): Promise<void> => {
-    const article = await this.cmsService.saveArticle(req.body, actorId(req));
+    const article = await this.cmsService.saveArticle(withRouteId(req), actorId(req));
     sendSuccess(res, { data: article, message: "Blog article saved successfully" });
   };
 
@@ -146,7 +161,7 @@ export class CmsController {
   };
 
   saveFaq = async (req: Request, res: Response): Promise<void> => {
-    const faq = await this.cmsService.saveFaq(req.body, actorId(req));
+    const faq = await this.cmsService.saveFaq(withRouteId(req), actorId(req));
     sendSuccess(res, { data: faq, message: "FAQ saved successfully" });
   };
 
@@ -161,7 +176,7 @@ export class CmsController {
   };
 
   saveTestimonial = async (req: Request, res: Response): Promise<void> => {
-    const testimonial = await this.cmsService.saveTestimonial(req.body, actorId(req));
+    const testimonial = await this.cmsService.saveTestimonial(withRouteId(req), actorId(req));
     sendSuccess(res, { data: testimonial, message: "Testimonial saved successfully" });
   };
 
@@ -176,7 +191,7 @@ export class CmsController {
   };
 
   saveTrainer = async (req: Request, res: Response): Promise<void> => {
-    const trainer = await this.cmsService.saveTrainer(req.body, actorId(req));
+    const trainer = await this.cmsService.saveTrainer(withRouteId(req), actorId(req));
     sendSuccess(res, { data: trainer, message: "Trainer profile saved successfully" });
   };
 
@@ -191,7 +206,7 @@ export class CmsController {
   };
 
   saveAchievement = async (req: Request, res: Response): Promise<void> => {
-    const achievement = await this.cmsService.saveAchievement(req.body, actorId(req));
+    const achievement = await this.cmsService.saveAchievement(withRouteId(req), actorId(req));
     sendSuccess(res, { data: achievement, message: "Achievement saved successfully" });
   };
 
@@ -206,7 +221,7 @@ export class CmsController {
   };
 
   saveCareer = async (req: Request, res: Response): Promise<void> => {
-    const career = await this.cmsService.saveCareer(req.body, actorId(req));
+    const career = await this.cmsService.saveCareer(withRouteId(req), actorId(req));
     sendSuccess(res, { data: career, message: "Career opening saved successfully" });
   };
 
@@ -220,9 +235,34 @@ export class CmsController {
     sendSuccess(res, { data: partners });
   };
 
-  saveHiringPartner = async (req: Request, res: Response): Promise<void> => {
-    const partner = await this.cmsService.saveHiringPartner(req.body, actorId(req));
-    sendSuccess(res, { data: partner, message: "Hiring partner saved successfully" });
+  /** Says plainly which supplied fields could not be stored (no database column). */
+  private partnerSavedMessage(body: Record<string, unknown>): string {
+    const notStored = ["logoUrl", "placementsCount", "isFeatured", "displayOrder"].filter(
+      (k) => body[k] !== undefined && body[k] !== "",
+    );
+    return notStored.length
+      ? `Hiring partner saved. Not stored (the database has no column for them): ${notStored.join(", ")}.`
+      : "Hiring partner saved successfully";
+  }
+
+  /** POST /partners: always creates a new company; any id in the body is ignored. */
+  createHiringPartner = async (req: Request, res: Response): Promise<void> => {
+    const partner = await this.cmsService.createHiringPartner(req.body, actorId(req));
+    sendSuccess(res, { data: partner, message: this.partnerSavedMessage(req.body as Record<string, unknown>) });
+  };
+
+  /** PUT /partners/:id: updates only the existing company with that numeric id. */
+  updateHiringPartner = async (req: Request, res: Response): Promise<void> => {
+    const id = req.params.id as string;
+    const bodyId = (req.body as { id?: unknown }).id;
+    if (bodyId !== undefined && bodyId !== "" && String(bodyId) !== id) {
+      throw ApiError.validation(
+        [{ field: "id", message: "The company id in the body does not match the id in the URL." }],
+        "The company id in the body does not match the id in the URL.",
+      );
+    }
+    const partner = await this.cmsService.updateHiringPartner(id, req.body, actorId(req));
+    sendSuccess(res, { data: partner, message: this.partnerSavedMessage(req.body as Record<string, unknown>) });
   };
 
   deleteHiringPartner = async (req: Request, res: Response): Promise<void> => {
@@ -244,7 +284,7 @@ export class CmsController {
   };
 
   saveCollegePartner = async (req: Request, res: Response): Promise<void> => {
-    const partner = await this.cmsService.saveCollegePartner(req.body, actorId(req));
+    const partner = await this.cmsService.saveCollegePartner(withRouteId(req), actorId(req));
     sendSuccess(res, { data: partner, message: "College partner saved successfully" });
   };
 
@@ -268,13 +308,18 @@ export class CmsController {
   };
 
   saveCorporateTrainingService = async (req: Request, res: Response): Promise<void> => {
-    const service = await this.cmsService.saveCorporateTrainingService(req.body, actorId(req));
+    const service = await this.cmsService.saveCorporateTrainingService(withRouteId(req), actorId(req));
     sendSuccess(res, { data: service, message: "Corporate training service saved successfully" });
   };
 
   deleteCorporateTrainingService = async (req: Request, res: Response): Promise<void> => {
     await this.cmsService.deleteCorporateTrainingService(req.params.id as string, actorId(req));
     sendSuccess(res, { data: true, message: "Corporate training service deleted successfully" });
+  };
+
+  reorderCorporateTrainingServices = async (req: Request, res: Response): Promise<void> => {
+    const services = await this.cmsService.reorderCorporateTrainingServices(req.body.ids, actorId(req));
+    sendSuccess(res, { data: services, message: "Corporate training services reordered" });
   };
 
   updateCorporateTrainingServiceStatus = async (req: Request, res: Response): Promise<void> => {
@@ -312,6 +357,10 @@ export class CmsController {
   getAllEnquiries = async (_req: Request, res: Response): Promise<void> => {
     const enquiries = await this.cmsService.getAllEnquiries();
     sendSuccess(res, { data: enquiries });
+  };
+
+  getAllCallbackRequests = async (_req: Request, res: Response): Promise<void> => {
+    sendSuccess(res, { data: await this.cmsService.getAllCallbackRequests() });
   };
 
   updateEnquiryStatus = async (req: Request, res: Response): Promise<void> => {

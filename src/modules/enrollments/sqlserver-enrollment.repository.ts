@@ -7,7 +7,8 @@ import {
   RecordNotFoundError,
 } from "../../repositories/repository.errors";
 import { getSqlServerPool } from "../../db/sqlserver.pool";
-import type { EnrollmentRepository } from "./enrollment.repository";
+import { writeEnrollmentStatusHistory } from "../../db/history-writers";
+import { BatchFullError, type EnrollmentRepository } from "./enrollment.repository";
 import {
   type CreateEnrollmentInput,
   type Enrollment,
@@ -64,6 +65,12 @@ const mapRowToEnrollment = (row: EnrollmentRow): Enrollment => {
     ...(row.BatchId ? { batchId: String(row.BatchId) } : {}),
     enrollmentType,
     status,
+    ...(row.FinalAmount !== null && row.FinalAmount !== undefined && Number.isFinite(Number(row.FinalAmount))
+      ? { amountDueINR: Number(row.FinalAmount) }
+      : {}),
+    ...(row.DiscountAmount !== null && row.DiscountAmount !== undefined && Number.isFinite(Number(row.DiscountAmount))
+      ? { discountAmountINR: Number(row.DiscountAmount) }
+      : {}),
     enrolledAt: row.CreatedAt instanceof Date ? row.CreatedAt.toISOString() : String(row.CreatedAt),
     ...(row.CompletedAt
       ? {
@@ -246,14 +253,7 @@ export class SqlServerEnrollmentRepository implements EnrollmentRepository {
       throw new DuplicateRecordError("enrollment", "courseId", input.courseId);
     }
 
-    const req = pool.request();
     const enrollmentNum = `ENR-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    req.input("num", sql.VarChar(40), enrollmentNum);
-    req.input("studentId", sql.BigInt, input.studentId);
-    req.input("courseId", sql.BigInt, input.courseId);
-    req.input("batchId", sql.BigInt, input.batchId ?? null);
-    req.input("status", sql.VarChar(25), (input.status ?? "PENDING_APPROVAL").toUpperCase());
-    req.input("source", sql.VarChar(20), (input.enrollmentType ?? "SELF").toUpperCase());
 
     // Fetch course price
     const courseReq = pool.request();
@@ -262,10 +262,43 @@ export class SqlServerEnrollmentRepository implements EnrollmentRepository {
       SELECT ListPrice FROM dbo.NXA_Courses WHERE CourseId = @cId
     `);
     const price = Number(courseRes.recordset[0]?.ListPrice ?? 0);
-    req.input("price", sql.Decimal(12, 2), price);
-    req.input("final", sql.Decimal(12, 2), price);
 
+    const tx = pool.transaction();
+    await tx.begin();
+    let id: string;
     try {
+      if (input.enforceBatchCapacity && input.batchId) {
+        // D6: the batch row is locked until commit, so two concurrent
+        // enrollments into the same batch are serialized and cannot both take
+        // the last place. Counted exactly as the batch's CurrentEnrollments
+        // (every status except CANCELLED). NULL capacity = no limit.
+        const b = await tx
+          .request()
+          .input("batchId", sql.BigInt, input.batchId)
+          .query<{ Capacity: number | null }>(`SELECT Capacity FROM dbo.NXA_Batches WITH (UPDLOCK, HOLDLOCK) WHERE BatchId = @batchId`);
+        const capacity = b.recordset[0]?.Capacity;
+        if (capacity !== null && capacity !== undefined) {
+          const c = await tx
+            .request()
+            .input("batchId", sql.BigInt, input.batchId)
+            .query<{ cnt: number }>(`
+              SELECT COUNT(1) AS cnt FROM dbo.NXA_Enrollments WITH (UPDLOCK, HOLDLOCK)
+              WHERE BatchId = @batchId AND UPPER(EnrollmentStatus) <> 'CANCELLED'
+            `);
+          if (Number(c.recordset[0]?.cnt ?? 0) >= Number(capacity)) throw new BatchFullError(String(input.batchId), Number(capacity));
+        }
+      }
+
+      const req = tx.request();
+      req.input("num", sql.VarChar(40), enrollmentNum);
+      req.input("studentId", sql.BigInt, input.studentId);
+      req.input("courseId", sql.BigInt, input.courseId);
+      req.input("batchId", sql.BigInt, input.batchId ?? null);
+      req.input("status", sql.VarChar(25), (input.status ?? "PENDING_APPROVAL").toUpperCase());
+      req.input("source", sql.VarChar(20), (input.enrollmentType ?? "SELF").toUpperCase());
+      req.input("price", sql.Decimal(12, 2), price);
+      req.input("final", sql.Decimal(12, 2), price);
+
       const result = await req.query<{ EnrollmentId: number | bigint }>(`
         INSERT INTO dbo.NXA_Enrollments (
           EnrollmentNumber,
@@ -295,14 +328,14 @@ export class SqlServerEnrollmentRepository implements EnrollmentRepository {
           SYSUTCDATETIME()
         )
       `);
-
-      const id = String(result.recordset[0]?.EnrollmentId);
-      const created = await this.findById(id);
-      if (!created) {
-        throw new Error("Failed to reload created enrollment");
-      }
-      return created;
+      id = String(result.recordset[0]?.EnrollmentId);
+      await tx.commit();
     } catch (err: unknown) {
+      try {
+        await tx.rollback();
+      } catch {
+        // already rolled back
+      }
       if (err instanceof Error && "number" in err) {
         const sqlNum = (err as { number: number }).number;
         if (sqlNum === 2601 || sqlNum === 2627) {
@@ -311,25 +344,63 @@ export class SqlServerEnrollmentRepository implements EnrollmentRepository {
       }
       throw err;
     }
+
+    const created = await this.findById(id);
+    if (!created) {
+      throw new Error("Failed to reload created enrollment");
+    }
+    return created;
   }
 
-  async setStatus(id: EntityId, status: EnrollmentStatus): Promise<Enrollment> {
+  async setStatus(
+    id: EntityId,
+    status: EnrollmentStatus,
+    history?: { changedByUserId: string | null; reason?: string | undefined },
+  ): Promise<Enrollment> {
+    if (!/^\d{1,19}$/.test(String(id))) throw new RecordNotFoundError("enrollment", id);
     const pool = await this.getPool();
-    const req = pool.request();
-    req.input("id", sql.BigInt, id);
-    req.input("status", sql.VarChar(25), status.toUpperCase());
+    const tx = pool.transaction();
+    await tx.begin();
+    try {
+      const cur = tx.request();
+      cur.input("id", sql.BigInt, id);
+      const before = await cur.query<{ EnrollmentStatus: string }>(
+        `SELECT EnrollmentStatus FROM dbo.NXA_Enrollments WITH (UPDLOCK, HOLDLOCK) WHERE EnrollmentId = @id`,
+      );
+      const row = before.recordset[0];
+      if (!row) throw new RecordNotFoundError("enrollment", id);
+      const newStatus = status.toUpperCase();
 
-    const result = await req.query(`
-      UPDATE dbo.NXA_Enrollments
-      SET EnrollmentStatus = @status,
-          ActivatedAt = CASE WHEN @status = 'ACTIVE' AND ActivatedAt IS NULL THEN SYSUTCDATETIME() ELSE ActivatedAt END,
-          CompletedAt = CASE WHEN @status = 'COMPLETED' AND CompletedAt IS NULL THEN SYSUTCDATETIME() ELSE CompletedAt END,
-          UpdatedAt = SYSUTCDATETIME()
-      WHERE EnrollmentId = @id
-    `);
+      // A no-op change writes neither the row nor a history record.
+      if ((row.EnrollmentStatus ?? "").toUpperCase() !== newStatus) {
+        const req = tx.request();
+        req.input("id", sql.BigInt, id);
+        req.input("status", sql.VarChar(25), newStatus);
+        await req.query(`
+          UPDATE dbo.NXA_Enrollments
+          SET EnrollmentStatus = @status,
+              ActivatedAt = CASE WHEN @status = 'ACTIVE' AND ActivatedAt IS NULL THEN SYSUTCDATETIME() ELSE ActivatedAt END,
+              CompletedAt = CASE WHEN @status = 'COMPLETED' AND CompletedAt IS NULL THEN SYSUTCDATETIME() ELSE CompletedAt END,
+              UpdatedAt = SYSUTCDATETIME()
+          WHERE EnrollmentId = @id
+        `);
+        await writeEnrollmentStatusHistory(tx.request(), {
+          enrollmentId: String(id),
+          oldStatus: row.EnrollmentStatus,
+          newStatus,
+          changedByUserId: history?.changedByUserId ?? null,
+          reason: history?.reason,
+        });
+      }
 
-    if (result.rowsAffected[0] === 0) {
-      throw new RecordNotFoundError("enrollment", id);
+      await tx.commit();
+    } catch (err) {
+      try {
+        await tx.rollback();
+      } catch {
+        // the original error is the one worth reporting
+      }
+      throw err;
     }
 
     const updated = await this.findById(id);

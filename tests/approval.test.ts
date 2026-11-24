@@ -37,7 +37,12 @@ describe("approval decisions (service)", () => {
   let h: TestHarness;
   let service: ReturnType<typeof createStudentService>;
 
-  const seedStudent = async (email = "cand@test.local", mobile = "9876543210") => {
+  /**
+   * A candidate awaiting a decision. Email and mobile are verified by default
+   * because approval requires both (BR-001); pass `verified: false` to seed
+   * an unverified applicant.
+   */
+  const seedStudent = async (email = "cand@test.local", mobile = "9876543210", verified = true) => {
     const user = await h.users.create({
       name: "Candidate",
       email,
@@ -47,6 +52,10 @@ describe("approval decisions (service)", () => {
     });
 
     await h.students.createForUser(user.id, profile);
+    if (verified) {
+      await h.students.markVerified(user.id, "email");
+      await h.students.markVerified(user.id, "mobile");
+    }
 
     return user.id;
   };
@@ -144,15 +153,32 @@ describe("approval decisions (service)", () => {
     assert.equal(stored?.accountState, undefined);
   });
 
-  it("approves regardless of email verification, leaving the gap visible", async () => {
-    // No confirmed rule requires verification before approval, so none is
-    // invented. The derived state still reports pending_verification.
-    const id = await seedStudent();
+  it("refuses approval until the email is verified (BR-001)", async () => {
+    const id = await seedStudent("unverified@test.local", "9876500401", false);
+
+    await assert.rejects(
+      () => service.approveStudent(id, "admin-1"),
+      (err: { status?: number; code?: string }) => err.status === 422 && err.code === "EMAIL_NOT_VERIFIED",
+    );
+    assert.equal((await h.students.findById(id))?.adminApprovalStatus, "pending");
+  });
+
+  it("approves with a verified email while the mobile stays unverified (CL-001: mobile OTP deferred)", async () => {
+    const id = await seedStudent("emailonly@test.local", "9876500402", false);
+    await h.students.markVerified(id, "email");
 
     const result = await service.approveStudent(id, "admin-1");
 
     assert.equal(result.adminApprovalStatus, "approved");
-    assert.equal(result.isEmailVerified, false);
+    assert.equal(result.isMobileVerified, false, "the mobile is never marked verified without verification");
+  });
+
+  it("still lets an admin reject an unverified applicant", async () => {
+    const id = await seedStudent("rejectme@test.local", "9876500403", false);
+
+    const result = await service.rejectStudent(id, "admin-1", "Incomplete documents");
+
+    assert.equal(result.adminApprovalStatus, "rejected");
   });
 
   describe("invalid transitions", () => {
@@ -271,7 +297,7 @@ describe("approval endpoints over HTTP", () => {
   };
 
   /** A pending candidate awaiting a decision. */
-  const seedCandidate = async (email: string, mobile: string): Promise<string> => {
+  const seedCandidate = async (email: string, mobile: string, verified = true): Promise<string> => {
     const user = await h.users.create({
       name: "Candidate",
       email,
@@ -281,6 +307,11 @@ describe("approval endpoints over HTTP", () => {
     });
 
     await h.students.createForUser(user.id, profile);
+    // Approval requires both verifications (BR-001).
+    if (verified) {
+      await h.students.markVerified(user.id, "email");
+      await h.students.markVerified(user.id, "mobile");
+    }
 
     return user.id;
   };
@@ -346,6 +377,7 @@ describe("approval endpoints over HTTP", () => {
         container: h.container,
         extraV1Routes,
         authenticate: createAuthenticate({
+          studentAccess: null,
           sessions: () => h.container.repositories.sessions,
         }),
       }),
@@ -611,8 +643,25 @@ describe("approval endpoints over HTTP", () => {
      * =======================================================================
      */
 
+    it("PATCH /students/:id/status refuses to activate an unapproved or unverified candidate", async () => {
+      const pendingId = await seedCandidate("noactivate@test.local", "9876500310");
+      const unapproved = await patch(`/api/v1/students/${pendingId}/status`, { status: "active" }, authed(tokens.admin as string));
+      assert.equal(unapproved.status, 422);
+      assert.equal((await h.users.findById(pendingId))?.status, "pending", "the user record is untouched");
+
+      const unverifiedId = await seedCandidate("unverified-act@test.local", "9876500311", false);
+      const unverified = await patch(`/api/v1/students/${unverifiedId}/status`, { status: "active" }, authed(tokens.admin as string));
+      assert.equal(unverified.status, 422);
+
+      // Suspension is still available for a pending account.
+      const suspend = await patch(`/api/v1/students/${pendingId}/status`, { status: "suspended" }, authed(tokens.admin as string));
+      assert.equal(suspend.status, 200);
+    });
+
     it("PATCH /students/:id/status active updates the USER record", async () => {
       const id = await seedCandidate("activate@test.local", "9876500300");
+      // Only an approved student can be activated.
+      await server.post(`/api/v1/students/${id}/approve`, {}, authed(tokens.admin as string));
 
       const res = await patch(
         `/api/v1/students/${id}/status`,

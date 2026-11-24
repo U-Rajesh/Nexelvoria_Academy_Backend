@@ -73,13 +73,29 @@ export interface ManualPaymentRecord {
   createdAt: string;
 }
 
+/**
+ * A coupon: an NXA_Coupons row (code, limits, usage) and the NXA_Discounts row
+ * it applies (type, value, validity). `id` is the CouponId.
+ */
 export interface CouponDiscount {
   id: string;
+  /** NXA_Discounts.DiscountId the coupon applies. */
+  discountId?: string | undefined;
   code: string;
   description: string;
   discountType: 'percentage' | 'fixed_amount';
   value: number;
+  /** Not storable in the live schema (no coupon-course table); always empty when read. */
   applicableCourseIds?: string[] | undefined;
+  /** Coupon AND discount active. */
   isActive: boolean;
+  /** Date (YYYY-MM-DD) of NXA_Discounts.EndsAt, for display. */
   validUntil?: string | undefined;
+  /** Exact NXA_Discounts.StartsAt / EndsAt (ISO), used for the validity checks. */
+  startsAt?: string | undefined;
+  endsAt?: string | undefined;
+  /** NULL in the database means no limit. */
+  usageLimit?: number | null | undefined;
+  perUserLimit?: number | null | undefined;
+  usageCount?: number | undefined;
 }

@@ -161,9 +161,22 @@ const courseMetadataFields = {
 };
 
 /** `POST /courses` body. A new course is always a Draft (see service). */
+/**
+ * Create body. Fields with no NXA_Courses column (see UNPERSISTED_COURSE_FIELDS)
+ * are optional: the SQL Server adapter rejects them until a schema change
+ * makes them storable, so a client must be able to create a course without
+ * them.
+ */
 export const createCourseBodySchema = z.object({
   slug: creatableSlugSchema,
   ...courseMetadataFields,
+  thumbnailUrl: courseMetadataFields.thumbnailUrl.optional(),
+  totalHours: courseMetadataFields.totalHours.optional(),
+  category: courseMetadataFields.category.optional(),
+  technologies: courseMetadataFields.technologies.optional(),
+  hasPlacementGuarantee: courseMetadataFields.hasPlacementGuarantee.optional(),
+  prerequisites: courseMetadataFields.prerequisites.optional(),
+  learningOutcomes: courseMetadataFields.learningOutcomes.optional(),
 });
 
 export type CreateCourseBody = z.infer<typeof createCourseBodySchema>;
@@ -218,7 +231,8 @@ const lessonSchema = z.object({
   title: text(200),
   durationMinutes: z.number().int().nonnegative(),
   lessonType: z.enum(LESSON_TYPES).optional(),
-  videoUrl: blankAsAbsent(httpUrl),
+  // NXA_Lessons.ExternalUrl is nvarchar(1000).
+  videoUrl: blankAsAbsent(httpUrl.max(1000)),
   pdfUrl: blankAsAbsent(httpUrl),
   // Blank -> absent, like videoUrl/pdfUrl: the syllabus editor always sends
   // a string, "" when empty. Non-blank text is kept verbatim (NOT trimmed),
@@ -229,13 +243,18 @@ const lessonSchema = z.object({
   order: z.number().int().nonnegative(),
   isLocked: z.boolean().optional(),
   isDownloadRestricted: z.boolean().optional(),
+  // LMS-004 / LMS-005 (NXA_Lessons.IsSequentialUnlock / PublishAt). publishAt is an absolute
+  // instant with its UTC offset, so no time-zone rule is needed; null / absent = available now.
+  isSequentialUnlock: z.boolean().optional(),
+  publishAt: z.string().datetime({ offset: true }).nullable().optional(),
 });
 
 const chapterSchema = z.object({
   id: entityIdSchema,
   moduleId: entityIdSchema,
   title: text(200),
-  description: blankAsAbsent(z.string().trim().max(2000)),
+  // NXA_Chapters.Description is nvarchar(1000).
+  description: blankAsAbsent(z.string().trim().max(1000)),
   order: z.number().int().nonnegative(),
   lessons: z.array(lessonSchema).max(200),
 });
@@ -245,7 +264,8 @@ const moduleSchema = z.object({
   courseId: entityIdSchema,
   title: text(200),
   // Required by the frontend type but may legitimately be empty.
-  description: z.string().trim().max(2000),
+  // NXA_CourseModules.ModuleDescription is nvarchar(1000).
+  description: z.string().trim().max(1000),
   order: z.number().int().nonnegative(),
   chapters: z.array(chapterSchema).max(100),
 });
@@ -261,4 +281,17 @@ export const curriculumBodySchema = z.object({
 });
 
 export type CurriculumBody = z.infer<typeof curriculumBodySchema>;
+
+/**
+ * `PUT /courses/:courseId/prerequisites` body: the WHOLE prerequisite set
+ * (a replace). Prerequisites are other courses (NXA_CoursePrerequisites).
+ */
+export const prerequisitesBodySchema = z.object({
+  prerequisiteCourseIds: z
+    .array(entityIdSchema)
+    .max(50)
+    .refine((ids) => new Set(ids).size === ids.length, { message: "Each prerequisite course may be listed once" }),
+});
+
+export type PrerequisitesBody = z.infer<typeof prerequisitesBodySchema>;
 export type CurriculumModuleBody = CurriculumBody["modules"][number];

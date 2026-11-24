@@ -640,9 +640,40 @@ describe("students service - setStudentStatus (Task 3.2)", () => {
     assert.equal((await service.setStudentStatus("s1", "active")).status, "active");
   });
 
-  it("allows any transition - no rules are invented (e.g. deactivated -> active)", async () => {
-    h.students.seed(student({ id: "s1", status: "deactivated", adminApprovalStatus: "pending" }));
+  it("re-activates an approved, verified student (e.g. deactivated -> active)", async () => {
+    h.students.seed(student({ id: "s1", status: "deactivated" }));
     assert.equal((await service.setStudentStatus("s1", "active")).status, "active");
+  });
+
+  it("refuses to activate an unapproved student (approved rule, Milestone 4)", async () => {
+    for (const approval of ["pending", "rejected"] as const) {
+      h.students.seed(student({ id: `s-${approval}`, status: "pending", adminApprovalStatus: approval }));
+      await assert.rejects(
+        service.setStudentStatus(`s-${approval}`, "active"),
+        (err: { status?: number; code?: string }) => err.status === 422 && err.code === "STUDENT_NOT_APPROVED",
+      );
+      assert.equal((await h.students.findById(`s-${approval}`))?.status, "pending", "nothing written");
+    }
+  });
+
+  it("refuses to activate a student whose email is unverified", async () => {
+    h.students.seed(student({ id: "s-email", status: "suspended", isEmailVerified: false }));
+    await assert.rejects(
+      service.setStudentStatus("s-email", "active"),
+      (err: { status?: number; code?: string }) => err.status === 422 && err.code === "STUDENT_NOT_VERIFIED",
+    );
+  });
+
+  it("activates an approved, email-verified student whose mobile is unverified (CL-001)", async () => {
+    h.students.seed(student({ id: "s-mobile", status: "suspended", isMobileVerified: false }));
+    assert.equal((await service.setStudentStatus("s-mobile", "active")).status, "active");
+  });
+
+  it("still suspends or deactivates any student, approved or not", async () => {
+    h.students.seed(student({ id: "s-approved", status: "active" }));
+    h.students.seed(student({ id: "s-pending", status: "pending", adminApprovalStatus: "pending", isEmailVerified: false }));
+    assert.equal((await service.setStudentStatus("s-approved", "suspended")).status, "suspended");
+    assert.equal((await service.setStudentStatus("s-pending", "deactivated")).status, "deactivated");
   });
 
   it("writes status ONLY - accountState and approval are untouched (D1, Option A)", async () => {
@@ -688,7 +719,7 @@ describe("students service - setStudentStatus (Task 3.2)", () => {
         typeof createStudentService
       >[0]["students"],
     });
-    await assert.rejects(failing.setStudentStatus("s1", "active"), (err: unknown) => err === boom);
+    await assert.rejects(failing.setStudentStatus("s1", "suspended"), (err: unknown) => err === boom);
   });
 });
 

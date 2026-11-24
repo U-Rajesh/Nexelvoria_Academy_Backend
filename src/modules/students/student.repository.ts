@@ -1,4 +1,5 @@
 import type { PaginatedResult, PaginationQuery } from "../../contracts/api.contract";
+import type { TransactionalAuditEntry } from "../../contracts/audit.contract";
 import type { EntityId } from "../../contracts/identifier.contract";
 import type { UserStatus } from "../../contracts/user.contract";
 import type {
@@ -10,6 +11,13 @@ import type {
   StudentSort,
   UpdateStudentInput,
 } from "./student.types";
+
+/**
+ * A student-management audit entry (STUDENT_MGMT / Student, entity id =
+ * student id), written by the repository in the same transaction as the
+ * decision or status change it records.
+ */
+export type StudentAudit = TransactionalAuditEntry;
 
 /**
  * The `students` repository PORT. Interface only - no SQL, no driver.
@@ -100,15 +108,19 @@ export interface StudentRepository {
   /** Patches profile fields. Throws RecordNotFoundError when absent. */
   update(id: EntityId, input: UpdateStudentInput): Promise<Student>;
 
-  /** Admin status change (active / suspended / deactivated). Audited. */
-  setStatus(id: EntityId, status: UserStatus): Promise<Student>;
+  /**
+   * Admin status change (active / suspended / deactivated). The audit entry is
+   * written in the same transaction; an unchanged status writes nothing and is
+   * not audited.
+   */
+  setStatus(id: EntityId, status: UserStatus, audit?: StudentAudit): Promise<Student>;
 
   /**
    * Records an approval or rejection (BR-002: approval gates payment).
    * Separate from `update` because it is an audited decision with an
    * actor and a timestamp, not a profile edit.
    */
-  recordApprovalDecision(id: EntityId, decision: ApprovalDecision): Promise<Student>;
+  recordApprovalDecision(id: EntityId, decision: ApprovalDecision, audit?: StudentAudit): Promise<Student>;
 
   /**
    * Marks a verification channel confirmed.

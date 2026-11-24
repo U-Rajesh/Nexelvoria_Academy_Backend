@@ -38,6 +38,12 @@ export interface Lesson {
   isLocked?: boolean;
   /** Download permission control. */
   isDownloadRestricted?: boolean;
+  /** LMS-004: opens only after the previous lesson (course order) is completed. */
+  isSequentialUnlock?: boolean;
+  /** LMS-005: ISO instant before which students cannot open the lesson (NXA_Lessons.PublishAt). */
+  publishAt?: string;
+  /** NXA_Lessons.Status = PUBLISHED. Absent is treated as published. */
+  isPublished?: boolean;
 }
 
 export interface Chapter {
@@ -102,14 +108,17 @@ export interface Course {
   title: string;
   shortDescription: string;
   longDescription: string;
-  thumbnailUrl: string;
+  /** No NXA_Courses column: absent when read from SQL Server (never an invented path). */
+  thumbnailUrl?: string | undefined;
   durationWeeks: number;
-  totalHours: number;
+  /** No column: absent when read from SQL Server (never derived from weeks). */
+  totalHours?: number | undefined;
   /** Fee in whole INR. Never a float - see handoff on money types. */
   feeINR: number;
   discountedFeeINR?: number;
   level: CourseLevel;
-  category: CourseCategory;
+  /** No column: absent when read from SQL Server (never a default category). */
+  category?: CourseCategory | undefined;
   technologies: string[];
   modules: CourseModule[];
   isPublished: boolean;
@@ -206,7 +215,28 @@ export type PublicCourseFilter = Pick<
 >;
 
 /** Fields accepted when creating a course. Curriculum is set separately. */
-export type CreateCourseInput = Omit<Course, "id" | "modules" | "isPublished" | "status">;
+/**
+ * Course fields with no column in the live NXA_Courses table. The SQL Server
+ * adapter rejects them (UnsupportedFieldsError) instead of silently dropping
+ * them; they become storable only after an approved schema change.
+ */
+export const UNPERSISTED_COURSE_FIELDS = [
+  "thumbnailUrl",
+  "totalHours",
+  "discountedFeeINR",
+  "category",
+  "technologies",
+  "hasPlacementGuarantee",
+  "prerequisites",
+  "learningOutcomes",
+  "eligibilityCriteria",
+  "syllabusPdfUrl",
+] as const;
+
+export type UnpersistedCourseField = (typeof UNPERSISTED_COURSE_FIELDS)[number];
+
+export type CreateCourseInput = Omit<Course, "id" | "modules" | "isPublished" | "status" | UnpersistedCourseField> &
+  Partial<Pick<Course, UnpersistedCourseField>>;
 
 /** Patchable course metadata. Curriculum has its own replace operation. */
 export type UpdateCourseInput = Partial<Omit<Course, "id" | "modules" | "slug">>;

@@ -75,6 +75,12 @@ export interface AuthenticatedPrincipal {
   role: UserRole;
   /** The `sid` claim: identifies the session this token was minted for. */
   sessionId: string;
+  /**
+   * Students only: the access tier resolved from the database on THIS
+   * request (CL-001). "limited" students may use only allowlisted endpoints;
+   * authorization denies everything else. Absent for other roles.
+   */
+  studentAccess?: "limited" | "approved";
 }
 
 /**
